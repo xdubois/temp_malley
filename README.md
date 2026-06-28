@@ -6,6 +6,8 @@ with outdoor weather. It was made to understand how the building handles summer 
 how much outdoor heat reaches inside, how the flat cools (or doesn't) at night, and how
 it compares to the SIA 180 / Minergie summer‑comfort expectations.
 
+**Live dashboard:** https://xdubois.github.io/temp_malley/ (rebuilt automatically on every push.)
+
 ## What it produces
 
 `uv run build_dashboard.py` generates a single self‑contained HTML file,
