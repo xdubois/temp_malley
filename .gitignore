@@ -1,0 +1,11 @@
+# Python / uv
+.venv/
+__pycache__/
+*.pyc
+
+# Generated outputs — rebuild with: uv run build_dashboard.py
+temperature_dashboard.html
+.outdoor_cache.json
+
+# Private source documents (not for publication)
+data/intake/

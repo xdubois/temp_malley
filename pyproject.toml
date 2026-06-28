@@ -1,0 +1,11 @@
+[project]
+name = "temp-malley"
+version = "0.1.0"
+description = "Interactive dashboard analysing indoor temperature & summer heat behaviour of a Minergie apartment in Malley."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas>=3.0.4",
+    "plotly>=6.8.0",
+    "requests>=2.34.2",
+]
