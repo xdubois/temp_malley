@@ -9,3 +9,8 @@ temperature_dashboard.html
 
 # Private source documents (not for publication)
 data/intake/
+
+# Secrets — never commit. SwitchBot token/key/device for local runs.
+# (In CI these come from GitHub repo secrets instead.)
+.env*
+!.env.example

@@ -21,7 +21,8 @@ import requests
 from plotly.offline import get_plotlyjs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CSV_15MIN = os.path.join(HERE, "data", "sensor_15min.csv")
+CSV_15MIN = os.path.join(HERE, "data", "sensor_15min.csv")   # manual app exports
+CSV_AUTO = os.path.join(HERE, "data", "sensor_auto.csv")     # append-only API poll log
 CSV_1MIN = os.path.join(HERE, "data", "sensor_1min.csv")
 OUT_HTML = os.path.join(HERE, "temperature_dashboard.html")
 OUTDOOR_CACHE = os.path.join(HERE, ".outdoor_cache.json")
@@ -65,18 +66,25 @@ CONFIG = {"responsive": True, "displaylogo": False,
 # --------------------------------------------------------------------------- #
 # Data loading
 # --------------------------------------------------------------------------- #
-def load_indoor(path: str, start: str | None = None) -> pd.DataFrame:
-    """Read the European-formatted sensor CSV onto a complete 15-min grid.
-
-    Values use comma decimals ('25,1'); missing 15-min slots become NaN so the
-    plotted line breaks across offline periods instead of jumping over them.
-    Rows before ``start`` are dropped.
-    """
+def _read_indoor_csv(path: str) -> pd.DataFrame:
+    """Parse one European-formatted sensor CSV ('25,1' comma decimals)."""
     df = pd.read_csv(path, decimal=",")
     df.columns = ["date", "temp", "hum", "dpt", "vpd", "abshum", "light"]
     df["date"] = pd.to_datetime(df["date"], format="%d/%m/%Y %H:%M")
-    df = df.dropna(subset=["date"]).set_index("date").sort_index()
-    df = df[~df.index.duplicated(keep="first")]
+    return df.dropna(subset=["date"]).set_index("date")
+
+
+def load_indoor(paths: list[str], start: str | None = None) -> pd.DataFrame:
+    """Merge the sensor CSVs onto a complete 15-min grid.
+
+    ``paths`` are given in priority order — on a duplicate timestamp the earlier
+    file wins (manual export over auto poll). Missing 15-min slots become NaN so
+    the plotted line breaks across offline periods instead of jumping over them.
+    Rows before ``start`` are dropped.
+    """
+    frames = [_read_indoor_csv(p) for p in paths if os.path.exists(p)]
+    df = pd.concat(frames)
+    df = df[~df.index.duplicated(keep="first")].sort_index()  # first = highest priority
     if start:
         df = df[df.index >= start]
     full = pd.date_range(df.index.min(), df.index.max(), freq="15min")
@@ -445,7 +453,7 @@ def main():
             start_date = a.split("=", 1)[1]
 
     print(f"Loading indoor 15-min data (from {start_date})…", file=sys.stderr)
-    df = load_indoor(CSV_15MIN, start_date)
+    df = load_indoor([CSV_15MIN, CSV_AUTO], start_date)
     start = df.index.min().strftime("%Y-%m-%d")
     end = df.index.max().strftime("%Y-%m-%d")
     n_indoor = int(df["temp"].notna().sum())
