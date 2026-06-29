@@ -116,15 +116,22 @@ def fetch_outdoor(start: str, end: str) -> pd.DataFrame:
         j = requests.get(base, params=params, timeout=60).json()
         if "hourly" not in j:  # open-meteo signals errors as {"error","reason"}
             raise RuntimeError(j.get("reason", j))
-        return pd.DataFrame(j["hourly"]).rename(
+        d = pd.DataFrame(j["hourly"]).rename(
             columns={"temperature_2m": "temp", "shortwave_radiation": "rad"})
+        # parse to real datetimes — otherwise set_index keeps strings and the
+        # date-range filter compares lexically ("…T00:00" > "… 23:59"), which
+        # silently drops every row on the end day.
+        d["time"] = pd.to_datetime(d["time"])
+        return d
 
     # Forecast (past_days=92) covers the recent window — the whole span while it's
     # under ~92 days. Primary source; takes precedence on overlap.
     merged = None
     try:
+        # forecast_days=2 (not 1): near the UTC/local midnight boundary, day=1 can
+        # stop short of the current local day — 2 always reaches past "now".
         fc = grab("https://api.open-meteo.com/v1/forecast",
-                  past_days=92, forecast_days=1).set_index("time")
+                  past_days=92, forecast_days=2).set_index("time")
         merged = fc[(fc.index >= start) & (fc.index <= f"{end} 23:59")]
     except Exception as e:  # noqa: BLE001
         print(f"  (forecast fetch failed: {e})", file=sys.stderr)
@@ -215,9 +222,20 @@ def fig_overview(df, out):
         x=out.index, y=out["temp"], name="Outdoor", mode="lines",
         line=dict(color=C_OUT, width=1.3), connectgaps=False,
         hovertemplate="%{y:.1f} °C<extra>Outdoor</extra>"))
+    # Hold each reading flat across the missing 15-min slots until the next one, so
+    # sparse data (e.g. hourly live polls) draws as a connected flat line instead of
+    # lone dots. Capped at ~1 h (4 slots) so genuine offline gaps still break the line.
+    indoor = df["temp"].ffill(limit=4)
     fig.add_trace(go.Scatter(
-        x=df.index, y=df["temp"], name="Indoor", mode="lines",
-        line=dict(color=C_IN, width=1.6), connectgaps=False,
+        x=indoor.index, y=indoor, name="Indoor", mode="lines",
+        line=dict(color=C_IN, width=1.6, shape="hv"), connectgaps=False,
+        legendgroup="indoor", hovertemplate="%{y:.1f} °C<extra>Indoor</extra>"))
+    # Fallback: a reading still alone after the hold (first point after a long gap,
+    # nothing yet after it) can't draw as a line — show that one as a dot.
+    lone = indoor[indoor.notna() & indoor.shift().isna() & indoor.shift(-1).isna()]
+    fig.add_trace(go.Scatter(
+        x=lone.index, y=lone, mode="markers", name="Indoor", legendgroup="indoor",
+        showlegend=False, marker=dict(color=C_IN, size=5),
         hovertemplate="%{y:.1f} °C<extra>Indoor</extra>"))
     base_layout(fig, 460)
     fig.update_yaxes(title_text="Temperature (°C)")
@@ -477,6 +495,7 @@ def main():
 
     print("Fetching outdoor weather (Malley)…", file=sys.stderr)
     out = fetch_outdoor(start, end)
+    out = out[out.index <= df.index.max()]  # render outdoor only up to the latest indoor reading
     print(f"  {len(out)} hourly rows", file=sys.stderr)
 
     di = daily_indoor(df)
