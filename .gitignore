@@ -3,9 +3,13 @@
 __pycache__/
 *.pyc
 
-# Generated outputs — rebuild with: uv run build_dashboard.py
+# Generated outputs 
 temperature_dashboard.html
 .outdoor_cache.json
 
-# Private source documents (not for publication)
+#local input
 data/intake/
+
+#env
+.env*
+!.env.example

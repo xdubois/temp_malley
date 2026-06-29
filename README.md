@@ -43,14 +43,34 @@ caches it locally (`.outdoor_cache.json`); later runs are offline.
 | `SENSOR_OFFSET` | `0.8` | The entrance sensor reads ~0.8 °C cooler than the rest of the flat. |
 | `LAT`, `LON` | `46.53, 6.59` | Location for the outdoor weather (Malley). |
 
+## Live data (automatic)
+
+`fetch_sensor.py` polls the Hub 2 via the [SwitchBot Cloud API](https://github.com/OpenWonderLabs/SwitchBotAPI) and appends a row
+to `data/sensor_auto.csv` — an append-only log kept separate from the manually
+exported `sensor_15min.csv`, so re-dumping the manual export never clobbers
+polled rows (`build_dashboard.py` merges both on read). `poll-sensor.yml` runs it
+every 15 min and commits the reading, which rebuilds the dashboard. The API only
+returns the *current* reading, so it accumulates going forward — the app's manual
+export remains the only way to backfill older history.
+
+Setup: in the SwitchBot app get a **token** and **key** (Profile → Preferences →
+About → tap to open Developer Options); find the Hub 2 id with `uv run --env-file
+.env fetch_sensor.py --list`; then add `SWITCHBOT_TOKEN`, `SWITCHBOT_SECRET`, and
+`SWITCHBOT_DEVICE` as repo secrets (Settings → Secrets and variables → Actions).
+
 ## Project structure
 
 ```
 .
 ├── build_dashboard.py     # parse CSV → fetch weather → aggregate → render HTML
+├── fetch_sensor.py        # poll the Hub 2 (Cloud API) → append one row to the CSV
 ├── data/
-│   ├── sensor_15min.csv   # 15‑minute indoor sensor export (primary)
+│   ├── sensor_15min.csv   # manual app exports (overwrite anytime)
+│   ├── sensor_auto.csv    # append-only API poll log (merged with the above on read)
 │   └── sensor_1min.csv    # 1‑minute export (higher resolution, not yet used)
+├── .github/workflows/
+│   ├── poll-sensor.yml    # every 15 min: fetch_sensor.py → commit the reading
+│   └── pages.yml          # build + deploy the dashboard (on push / after a poll)
 ├── pyproject.toml / uv.lock
 └── README.md
 ```
@@ -62,6 +82,7 @@ rebuild them with the command above.
 
 - **Indoor:** a temperature/humidity sensor exported at 15‑min and 1‑min intervals
   (columns: temperature, relative humidity, dew point, VPD, absolute humidity, light;
-  European number format with comma decimals).
+  European number format with comma decimals). Recent readings are polled live
+  from the Hub 2 via the [SwitchBot Open API](https://github.com/OpenWonderLabs/SwitchBotAPI).
 - **Outdoor:** open‑meteo ERA5 archive + forecast, hourly temperature and solar
   radiation for the building's coordinates.

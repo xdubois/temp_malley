@@ -1,0 +1,46 @@
+name: Poll SwitchBot sensor
+
+# Polls the Hub 2 over the SwitchBot Cloud API and appends one reading to the
+# append-only data/sensor_auto.csv, matching the dataset's 15-min cadence.
+# 96 reqs/day — far under the API's 10k/day limit, and Actions minutes are free
+# on a public repo. The commit triggers a rebuild — see workflow_run in pages.yml.
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 min
+  workflow_dispatch:         # manual "Run workflow" button, for testing
+
+permissions:
+  contents: write            # to commit the new reading back to the repo
+
+concurrency:
+  group: poll-sensor
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Poll the sensor
+        env:
+          SWITCHBOT_TOKEN: ${{ secrets.SWITCHBOT_TOKEN }}
+          SWITCHBOT_SECRET: ${{ secrets.SWITCHBOT_SECRET }}
+          SWITCHBOT_DEVICE: ${{ secrets.SWITCHBOT_DEVICE }}
+        run: uv run fetch_sensor.py
+
+      - name: Commit the new reading (if any)
+        run: |
+          if [[ -z "$(git status --porcelain data/sensor_auto.csv)" ]]; then
+            echo "No new reading to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/sensor_auto.csv
+          git commit -m "data: SwitchBot reading $(date -u +%FT%TZ)"
+          git push

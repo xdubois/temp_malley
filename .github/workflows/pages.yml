@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+  # A poll commit is pushed with GITHUB_TOKEN, which by design does NOT fire the
+  # push trigger above — so rebuild when the poll workflow finishes instead.
+  workflow_run:
+    workflows: ["Poll SwitchBot sensor"]
+    types: [completed]
 
 # Permissions the deploy-pages action needs
 permissions:
