@@ -49,9 +49,10 @@ caches it locally (`.outdoor_cache.json`); later runs are offline.
 to `data/sensor_auto.csv` — an append-only log kept separate from the manually
 exported `sensor_15min.csv`, so re-dumping the manual export never clobbers
 polled rows (`build_dashboard.py` merges both on read). `poll-sensor.yml` runs it
-every 15 min and commits the reading, which rebuilds the dashboard. The API only
-returns the *current* reading, so it accumulates going forward — the app's manual
-export remains the only way to backfill older history.
+hourly at :07 (a grid slot, so readings land on the dump's cadence) and commits
+the reading, which rebuilds the dashboard. The API only returns the *current*
+reading, so it accumulates going forward — the app's manual export remains the
+only way to backfill older history.
 
 Setup: in the SwitchBot app get a **token** and **key** (Profile → Preferences →
 About → tap to open Developer Options); find the Hub 2 id with `uv run --env-file
@@ -69,7 +70,7 @@ About → tap to open Developer Options); find the Hub 2 id with `uv run --env-f
 │   ├── sensor_auto.csv    # append-only API poll log (merged with the above on read)
 │   └── sensor_1min.csv    # 1‑minute export (higher resolution, not yet used)
 ├── .github/workflows/
-│   ├── poll-sensor.yml    # every 15 min: fetch_sensor.py → commit the reading
+│   ├── poll-sensor.yml    # hourly at :07: fetch_sensor.py → commit the reading
 │   └── pages.yml          # build + deploy the dashboard (on push / after a poll)
 ├── pyproject.toml / uv.lock
 └── README.md

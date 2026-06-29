@@ -1,16 +1,13 @@
 name: Poll SwitchBot sensor
 
 # Polls the Hub 2 over the SwitchBot Cloud API and appends one reading to the
-# append-only data/sensor_auto.csv, matching the dataset's 15-min cadence.
-# 96 reqs/day — far under the API's 10k/day limit, and Actions minutes are free
-# on a public repo. The commit triggers a rebuild — see workflow_run in pages.yml.
 on:
   schedule:
-    - cron: "*/15 * * * *"   # every 15 min
-  workflow_dispatch:         # manual "Run workflow" button, for testing
+    - cron: "7 * * * *"   # hourly at :07
+  workflow_dispatch:
 
 permissions:
-  contents: write            # to commit the new reading back to the repo
+  contents: write
 
 concurrency:
   group: poll-sensor
