@@ -113,20 +113,36 @@ def fetch_outdoor(start: str, end: str) -> pd.DataFrame:
     def grab(base, **params):
         params.update(latitude=LAT, longitude=LON, timezone=TZ,
                       hourly="temperature_2m,shortwave_radiation")
-        h = requests.get(base, params=params, timeout=60).json()["hourly"]
-        return pd.DataFrame(h).rename(
+        j = requests.get(base, params=params, timeout=60).json()
+        if "hourly" not in j:  # open-meteo signals errors as {"error","reason"}
+            raise RuntimeError(j.get("reason", j))
+        return pd.DataFrame(j["hourly"]).rename(
             columns={"temperature_2m": "temp", "shortwave_radiation": "rad"})
 
-    arch = grab("https://archive-api.open-meteo.com/v1/archive",
-                start_date=start, end_date=end)
-    merged = arch.set_index("time")
-    try:  # fill recent tail the archive lags behind
+    # Forecast (past_days=92) covers the recent window — the whole span while it's
+    # under ~92 days. Primary source; takes precedence on overlap.
+    merged = None
+    try:
         fc = grab("https://api.open-meteo.com/v1/forecast",
                   past_days=92, forecast_days=1).set_index("time")
-        fc = fc[(fc.index >= start) & (fc.index <= f"{end} 23:59")]
-        merged = fc.combine_first(merged)
+        merged = fc[(fc.index >= start) & (fc.index <= f"{end} 23:59")]
     except Exception as e:  # noqa: BLE001
-        print(f"  (forecast tail fetch failed: {e})", file=sys.stderr)
+        print(f"  (forecast fetch failed: {e})", file=sys.stderr)
+
+    # Archive reaches further back than 92 days, but its end_date can't be the
+    # current day (HTTP 400) — cap it; recent days come from the forecast above.
+    arch_end = min(pd.Timestamp(end),
+                   pd.Timestamp.now().normalize() - pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+    if arch_end >= start:
+        try:
+            arch = grab("https://archive-api.open-meteo.com/v1/archive",
+                        start_date=start, end_date=arch_end).set_index("time")
+            merged = arch if merged is None else merged.combine_first(arch)
+        except Exception as e:  # noqa: BLE001
+            print(f"  (archive fetch failed: {e})", file=sys.stderr)
+
+    if merged is None or merged.empty:
+        raise SystemExit("  outdoor weather unavailable (open-meteo forecast + archive both failed)")
 
     merged = merged.sort_index()
     out = merged.reset_index()

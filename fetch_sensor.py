@@ -122,11 +122,16 @@ def grid_phase(path: str) -> int:
 
 
 def snap(now: datetime, phase: int) -> datetime:
-    """Round ``now`` to the nearest 15-min slot on ``phase``."""
+    """Floor ``now`` to the most recent 15-min slot on ``phase``.
+
+    Flooring (rather than rounding to nearest) never stamps a reading in the
+    future, and attributes a late scheduled run to its intended slot — e.g. the
+    :07 cron firing late at :16 still lands on :07, not :22.
+    """
     now = now.replace(second=0, microsecond=0, tzinfo=None)
     midnight = now.replace(hour=0, minute=0)
     mins = now.hour * 60 + now.minute
-    k = round((mins - phase) / 15)
+    k = math.floor((mins - phase) / 15)
     return midnight + timedelta(minutes=phase + k * 15)
 
 
