@@ -34,7 +34,12 @@ LAT, LON, TZ = 46.53, 6.59, "Europe/Zurich"
 # Override per run with --from=YYYY-MM-DD.
 START_DATE = "2026-04-28"
 
-MIN_READINGS_DAY = 48  # drop days with fewer 15-min readings from daily charts
+# Drop days with thin coverage from the daily charts. Counted as distinct
+# clock-hours that carry a reading — NOT a raw reading count — so the threshold
+# is independent of sampling cadence: a full 15-min-export day (~24 h) and a full
+# hourly-auto-poll day (~24 h) both qualify, while a barely-started day does not.
+# 12 h ≈ the old "48 × 15-min readings = half a day" rule.
+MIN_HOURS_DAY = 12
 
 # The sensor sits at the entrance, ~0.8 °C cooler than the rest of the flat.
 # When APPLY_OFFSET is True, SENSOR_OFFSET is added to every indoor reading so the
@@ -165,7 +170,11 @@ def fetch_outdoor(start: str, end: str) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 def daily_indoor(df: pd.DataFrame) -> pd.DataFrame:
     g = df["temp"].resample("D").agg(["min", "max", "mean", "count"])
-    g = g[g["count"] >= MIN_READINGS_DAY]
+    # distinct clock-hours covered per day (cadence-independent — see MIN_HOURS_DAY)
+    t = df.dropna(subset=["temp"])
+    hours = t.groupby([t.index.normalize(), t.index.hour]).size().groupby(level=0).size()
+    g["hours"] = hours.reindex(g.index).fillna(0)
+    g = g[g["hours"] >= MIN_HOURS_DAY]
     g["amp"] = g["max"] - g["min"]
     g["lmax"] = df["light"].resample("D").max().reindex(g.index)
     return g
@@ -474,7 +483,7 @@ def render(summary, figs) -> str:
   Indoor data: 15-min export ({s['n_indoor']:,} readings) from an entrance sensor,
   shown as {TEMP_REF}. Outdoor: open-meteo ERA5 + forecast for {LAT}, {LON}.
   Minergie summer-comfort target ≈ {MINERGIE_BUDGET_H} h/year above {COMFORT_T} °C.
-  Days with &lt;{MIN_READINGS_DAY} readings are excluded from daily charts.
+  Days covering &lt;{MIN_HOURS_DAY} h are excluded from daily charts.
   Rebuild with <code>uv run build_dashboard.py</code>.
 </footer>
 </body></html>"""
