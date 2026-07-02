@@ -56,6 +56,14 @@ COMFORT_T = 26.5
 WARM_T = 28.0
 MINERGIE_BUDGET_H = 100
 
+# Main façade / glazing orientation (shown on the dashboard).
+ORIENTATION = "North-West"
+
+# When counting hours above a threshold, each reading stands in for the time
+# until the next one (0.25 h on the 15-min export, ~1 h on the live polls) —
+# capped so an offline gap isn't all credited to the reading before it.
+READING_CAP_H = 2.0
+
 # palette
 C_IN = "#e8633a"      # indoor temperature (warm)
 C_IN_FILL = "rgba(232,99,58,0.15)"
@@ -93,6 +101,10 @@ def load_indoor(paths: list[str], start: str | None = None) -> pd.DataFrame:
     if start:
         df = df[df.index >= start]
     full = pd.date_range(df.index.min(), df.index.max(), freq="15min")
+    off_grid = df.index.difference(full)
+    if len(off_grid):  # reindex would silently discard these — e.g. after a phase shift
+        print(f"  WARNING: dropping {len(off_grid)} readings off the 15-min grid "
+              f"(first: {off_grid[0]}) — check export/poll phase alignment.", file=sys.stderr)
     df = df.reindex(full)
     if APPLY_OFFSET:
         df["temp"] = df["temp"] + SENSOR_OFFSET  # estimate living-space temperature
@@ -168,6 +180,19 @@ def fetch_outdoor(start: str, end: str) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # Aggregation
 # --------------------------------------------------------------------------- #
+def hours_over(temp: pd.Series, threshold: float) -> pd.Series:
+    """Duration-weighted hours above ``threshold``, per reading.
+
+    A flat 0.25 h/reading undercounts the live polls 4-8× (they arrive every
+    1-2 h, not every 15 min) — so weight each reading by the gap to the next,
+    capped at READING_CAP_H. On the 15-min export this reduces to 0.25 h.
+    """
+    s = temp.dropna()
+    gap = s.index.to_series().diff().shift(-1)
+    gap = gap.clip(upper=pd.Timedelta(hours=READING_CAP_H)).fillna(pd.Timedelta("15min"))
+    return (s > threshold) * (gap.dt.total_seconds() / 3600)
+
+
 def daily_indoor(df: pd.DataFrame) -> pd.DataFrame:
     g = df["temp"].resample("D").agg(["min", "max", "mean", "count"])
     # distinct clock-hours covered per day (cadence-independent — see MIN_HOURS_DAY)
@@ -352,9 +377,7 @@ def fig_comfort(di):
 
 def fig_budget(df):
     """Running total of hours above 26.5 °C against the Minergie ~100 h budget."""
-    s = df["temp"].dropna()
-    H = 0.25  # hours per 15-min reading
-    cum = ((s > COMFORT_T) * H).cumsum()
+    cum = hours_over(df["temp"], COMFORT_T).cumsum()
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=cum.index, y=cum.values, name=f"Hours over 26.5 °C — {TEMP_REF}",
@@ -379,6 +402,7 @@ def div(fig, name):
 
 def render(summary, figs) -> str:
     s = summary
+    built = pd.Timestamp.now(tz=TZ).strftime("%d %b %Y, %H:%M")
     monthly = " · ".join(f"{m} {v:.1f}°C" for m, v in s["monthly"].items())
     off_note = (
         f"Readings have +{SENSOR_OFFSET:g} °C added to estimate living-space "
@@ -387,6 +411,8 @@ def render(summary, figs) -> str:
         f"These are the raw entrance-sensor readings; the rest of the flat runs "
         f"~{SENSOR_OFFSET:g} °C warmer.")
     cards = [
+        ("Orientation", ORIENTATION,
+         "main façade — catches the low evening sun in summer"),
         ("Period", s["span"], f"{s['n_days']} days with data"),
         ("Indoor range", f"{s['t_min']:.1f} – {s['t_max']:.1f} °C",
          f"mean {s['t_mean']:.1f} °C"),
@@ -475,7 +501,8 @@ def render(summary, figs) -> str:
 <body>
 <header>
   <h1>Malley apartment — heat impact dashboard</h1>
-  <div class="sub">Indoor: {TEMP_REF}, 15-min · {s['span']} · outdoor: Malley (open-meteo)</div>
+  <div class="sub">Indoor: {TEMP_REF}, 15-min · {s['span']} · outdoor: Malley (open-meteo)
+    · façade {ORIENTATION} · built {built}</div>
 </header>
 <div class="cards">{card_html}</div>
 {sec_html}
@@ -512,14 +539,16 @@ def main():
     hm_days, hm_hours, hm_z = heatmap_matrix(df)
     lag, lag_r = thermal_lag(df, out)
 
-    monthly = (di["mean"].groupby(di.index.strftime("%B")).mean())
-    month_order = ["March", "April", "May", "June"]
-    monthly = {m: monthly[m] for m in month_order if m in monthly.index}
+    # group by calendar month, chronological — every month present in the data
+    # shows up (no hardcoded list to fall behind the season)
+    monthly = di["mean"].groupby(di.index.to_period("M")).mean()
+    fmt = "%B" if monthly.index[0].year == monthly.index[-1].year else "%b %Y"
+    monthly = {p.strftime(fmt): float(v) for p, v in monthly.items()}
 
     corr = di["mean"].reindex(do.index).corr(do["mean"])
     tmax = df["temp"].idxmax()
 
-    comfort_h = float((df["temp"].dropna() > COMFORT_T).sum() * 0.25)
+    comfort_h = float(hours_over(df["temp"], COMFORT_T).sum())
 
     summary = {
         "span": f"{df.index.min():%d %b} → {df.index.max():%d %b %Y}",

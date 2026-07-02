@@ -1,9 +1,12 @@
 name: Poll SwitchBot sensor
 
-# Polls the Hub 2 over the SwitchBot Cloud API and appends one reading to the
+# Polls the Hub 2 over the SwitchBot Cloud API and appends one reading to
+# data/sensor_auto.csv; the Pages workflow rebuilds the dashboard after each run.
 on:
   schedule:
-    - cron: "7 * * * *"   # hourly at :07
+    # :07 and :37 — both on the 15-min grid. GitHub fires scheduled jobs 40-75
+    # min late and skips some entirely, so two slots/hour ≈ hourly in practice.
+    - cron: "7,37 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -28,7 +31,9 @@ jobs:
           SWITCHBOT_TOKEN: ${{ secrets.SWITCHBOT_TOKEN }}
           SWITCHBOT_SECRET: ${{ secrets.SWITCHBOT_SECRET }}
           SWITCHBOT_DEVICE: ${{ secrets.SWITCHBOT_DEVICE }}
-        run: uv run fetch_sensor.py
+        # --script: inline PEP 723 deps (requests only) — skips installing the
+        # dashboard's pandas/plotly stack on every poll
+        run: uv run --script fetch_sensor.py
 
       - name: Commit the new reading (if any)
         run: |
@@ -40,4 +45,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add data/sensor_auto.csv
           git commit -m "data: SwitchBot reading $(date -u +%FT%TZ)"
-          git push
+          # a manual push can race the poll — rebase once and retry
+          git push || { git pull --rebase origin main && git push; }

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["requests"]
+# ///
 """Poll the SwitchBot Hub 2 once over the Cloud API and append one reading to
 ``data/sensor_auto.csv`` — in the exact European format the app exports and
 ``build_dashboard.py`` reads. Replaces the tedious manual "Export Data → CSV".
@@ -65,18 +69,23 @@ def _auth_headers(token: str, secret: str, upper: bool) -> dict:
 
 
 def _get(path: str, token: str, secret: str) -> dict:
+    fail = "Authentication failed — check SWITCHBOT_TOKEN / SWITCHBOT_SECRET."
     for upper in (True, False):  # try uppercased sign first, fall back on auth failure
         r = requests.get(API + path, headers=_auth_headers(token, secret, upper), timeout=30)
         if r.status_code == 401:
             continue
         r.raise_for_status()
         j = r.json()
-        if j.get("statusCode") in (401, 190):
+        code = j.get("statusCode")
+        if code == 190:  # device offline / not synced — not an auth problem
+            fail = f"API error 190: {j.get('message')} (hub offline / not synced?)"
             continue
-        if j.get("statusCode") != 100:
-            sys.exit(f"API error {j.get('statusCode')}: {j.get('message')}")
+        if code == 401:
+            continue
+        if code != 100:
+            sys.exit(f"API error {code}: {j.get('message')}")
         return j["body"]
-    sys.exit("Authentication failed — check SWITCHBOT_TOKEN / SWITCHBOT_SECRET.")
+    sys.exit(fail)
 
 
 # --------------------------------------------------------------------------- #
@@ -165,6 +174,12 @@ def main() -> None:
     t = float(s["temperature"])
     rh = float(s["humidity"])
     light = s.get("lightLevel", "")  # Hub 2 reports lightLevel (1-20); Meters don't
+
+    # An offline/stale hub can report zeros — never let a garbage row into the
+    # append-only log (it would permanently drag the daily min / comfort charts).
+    if not (-10 <= t <= 50) or not (0 < rh <= 100):
+        print(f"implausible reading ({t} °C, {rh} %RH) — hub offline or stale? skipping")
+        return
 
     stamp = snap(datetime.now(TZ), grid_phase(PHASE_REF)).strftime("%d/%m/%Y %H:%M")
     if stamp == last_stamp(CSV_PATH):

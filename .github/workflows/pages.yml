@@ -23,6 +23,8 @@ concurrency:
 
 jobs:
   build-and-deploy:
+    # workflow_run fires on failed polls too — only rebuild after a successful one
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
