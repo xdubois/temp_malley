@@ -213,6 +213,31 @@ def daily_outdoor(out: pd.DataFrame) -> pd.DataFrame:
     return g
 
 
+def nightly_cooling(df: pd.DataFrame, out: pd.DataFrame) -> pd.DataFrame:
+    """Per night (22:00 → 08:00): the cooling the outdoor air offered vs what
+    the flat actually shed.
+
+    avail = indoor at ~22:00 minus the night's outdoor minimum (the usable
+    gradient); shed = indoor at ~22:00 minus the night's indoor minimum. The
+    gap between the two is the night-ventilation bottleneck (airflow).
+    """
+    rows = []
+    for d in pd.date_range(df.index.min().normalize(),
+                           df.index.max().normalize(), freq="D"):
+        t0, t1 = d + pd.Timedelta(hours=22), d + pd.Timedelta(hours=32)
+        night_in = df["temp"].loc[t0:t1].dropna()
+        night_out = out["temp"].loc[t0:t1].dropna()
+        # need an evening reading before midnight and coverage into the morning
+        if (night_in.empty or night_out.empty
+                or night_in.index[0] >= d + pd.Timedelta(hours=26)
+                or night_in.index[-1] < d + pd.Timedelta(hours=30)):
+            continue
+        start_in = night_in.iloc[0]
+        rows.append({"night": d, "avail": start_in - night_out.min(),
+                     "shed": start_in - night_in.min()})
+    return pd.DataFrame(rows).set_index("night")
+
+
 def heatmap_matrix(df: pd.DataFrame):
     t = df.dropna(subset=["temp"]).copy()
     t["day"] = t.index.normalize()
@@ -250,7 +275,7 @@ def base_layout(fig, height=420, title=None):
     return fig
 
 
-def fig_overview(df, out):
+def fig_overview(df, out, rangeslider=True):
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=out.index, y=out["temp"], name="Outdoor", mode="lines",
@@ -273,7 +298,8 @@ def fig_overview(df, out):
         hovertemplate="%{y:.1f} °C<extra>Indoor</extra>"))
     base_layout(fig, 460)
     fig.update_yaxes(title_text="Temperature (°C)")
-    fig.update_xaxes(rangeslider=dict(visible=True), rangeslider_thickness=0.06)
+    if rangeslider:
+        fig.update_xaxes(rangeslider=dict(visible=True), rangeslider_thickness=0.06)
     return fig
 
 
@@ -345,6 +371,22 @@ def fig_sun(di, do):
         yaxis3=dict(overlaying="y", side="right", position=0.97,
                     showgrid=False, showticklabels=False, range=[0, 22]),
     )
+    return fig
+
+
+def fig_night(nc):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=nc.index, y=nc["shed"], name="Indoor drop achieved",
+        marker_color=C_IN,
+        hovertemplate="%{y:.1f} °C<extra>achieved</extra>"))
+    fig.add_trace(go.Scatter(
+        x=nc.index, y=nc["avail"], name="Gradient available to outdoors",
+        mode="lines+markers", line=dict(color=C_OUT, width=2, dash="dot"),
+        marker=dict(size=4),
+        hovertemplate="%{y:.1f} °C<extra>available</extra>"))
+    base_layout(fig, 420)
+    fig.update_yaxes(title_text="°C per night (22:00 → 08:00)")
     return fig
 
 
@@ -436,6 +478,11 @@ def render(summary, figs) -> str:
          "Malley. Drag on the chart or use the slider to zoom into any "
          "stretch.",
          "overview"),
+        ("Last 7 days",
+         "The same chart zoomed to the most recent week — mostly live polls "
+         "(one reading every 30-60 min) rather than the 15-min export. A reading "
+         "more than an hour from its neighbours shows as a lone dot.",
+         "recent"),
         ("Seasonal warming trend",
          "One point per day: the shaded band is the indoor min→max, the solid "
          "line the daily mean, dotted is the outdoor mean. Shows the apartment "
@@ -451,6 +498,12 @@ def render(summary, figs) -> str:
          "(bars), against the outdoor swing (dotted). A small indoor swing means "
          "the building buffers heat well.",
          "amplitude"),
+        ("Night cooling: available vs achieved",
+         "Per night (22:00 → 08:00): the gap between the evening indoor "
+         "temperature and the outdoor minimum (dotted — the potential), against "
+         "the indoor drop actually achieved (bars). The distance between the two "
+         "measures the air-renewal limit, independent of outdoor temperature.",
+         "night"),
         ("Sun & light vs temperature",
          "Outdoor solar radiation (filled), indoor temperature (line) and the "
          "indoor light sensor (dotted) per day — to see solar gain driving the "
@@ -485,6 +538,7 @@ def render(summary, figs) -> str:
   header {{ padding:32px 24px 8px; max-width:1180px; margin:0 auto; }}
   h1 {{ margin:0 0 4px; font-size:26px; }}
   .sub {{ color:var(--muted); font-size:14px; }}
+  .note {{ color:var(--muted); font-size:12.5px; margin-top:6px; max-width:820px; line-height:1.45; }}
   .cards {{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
     max-width:1180px; margin:20px auto 8px; padding:0 24px; }}
   .card {{ background:#fff; border:1px solid var(--line); border-radius:12px; padding:14px 16px; }}
@@ -503,6 +557,10 @@ def render(summary, figs) -> str:
   <h1>Malley apartment — heat impact dashboard</h1>
   <div class="sub">Indoor: {TEMP_REF}, 15-min · {s['span']} · outdoor: Malley (open-meteo)
     · façade {ORIENTATION} · built {built}</div>
+  <div class="note">Measured: air temperature at the entrance sensor, the coolest point
+    of the flat — living rooms run ~{SENSOR_OFFSET:g} °C warmer. The high-inertia flat is
+    thermally homogeneous (surfaces ≈ air), so operative temperature is close to the
+    measured air temperature.</div>
 </header>
 <div class="cards">{card_html}</div>
 {sec_html}
@@ -537,6 +595,7 @@ def main():
     di = daily_indoor(df)
     do = daily_outdoor(out)
     hm_days, hm_hours, hm_z = heatmap_matrix(df)
+    nc = nightly_cooling(df, out)
     lag, lag_r = thermal_lag(df, out)
 
     # group by calendar month, chronological — every month present in the data
@@ -571,11 +630,16 @@ def main():
         {k: (round(v, 2) if isinstance(v, float) else v) for k, v in summary.items()
          if k != "monthly"}, indent=2, default=str), file=sys.stderr)
 
+    week_ago = df.index.max() - pd.Timedelta(days=7)
     figs = {
         "overview": div(fig_overview(df, out), "overview"),
+        "recent": div(fig_overview(df[df.index >= week_ago],
+                                   out[out.index >= week_ago],
+                                   rangeslider=False), "recent"),
         "seasonal": div(fig_seasonal(di, do), "seasonal"),
         "heatmap": div(fig_heatmap(hm_days, hm_hours, hm_z), "heatmap"),
         "amplitude": div(fig_amplitude(di, do), "amplitude"),
+        "night": div(fig_night(nc), "night"),
         "sun": div(fig_sun(di, do), "sun"),
         "comfort": div(fig_comfort(di), "comfort"),
         "budget": div(fig_budget(df), "budget"),
