@@ -58,19 +58,26 @@ REF_SHORT, ALT_SHORT = (("living rooms (est.)", "entrance sensor") if APPLY_OFFS
                         else ("entrance sensor", "living rooms (est.)"))
 ALT_SHIFT = -SENSOR_OFFSET if APPLY_OFFSET else SENSOR_OFFSET
 
-# Minergie summer-comfort design target: at most ~100 h/year above 26.5 °C.
-COMFORT_T = 26.5
-WARM_T = 28.0
-MINERGIE_BUDGET_H = 100
+# Minergie summer comfort (Anwendungshilfe Gebäudestandards Minergie 2025, §6),
+# built on the two limit curves of SIA 180:2014. Both depend on θrm, the mean
+# outdoor air temperature over the preceding 48 h, and are given here as
+# (θrm, limit °C) breakpoints read off the figures — linear between, flat outside.
+#   Fig. 3  comfort field: may never be exceeded (0 h), mid-April → mid-October.
+#   Fig. 4  cooling need: cooling is required if exceeded > 100 h/a, April → October.
+#           Minergie applies the 100 h to every building (SIA allows 400 h for homes
+#           with mechanical ventilation). Its 26.5 °C plateau is the popular
+#           "100 h above 26.5 °C" rule.
+# Minergie certifies with design simulations (2035 weather, most exposed room); here
+# the same curves are applied to measured reality.
+FIG3_UPPER = [(9.7, 25.0), (25.0, 30.0)]
+FIG4_UPPER = [(12.0, 24.5), (17.5, 26.5)]
+FIG3_SEASON = ("04-15", "10-15")   # MM-DD, inclusive
+FIG4_SEASON = ("04-01", "10-31")
+MINERGIE_MAX_H = 100               # h/a above Fig. 4
+RM_HOURS = 48
 
-# Adaptive summer-comfort limit (EN 16798-1, category II): the acceptable upper
-# temperature rises with the running-mean outdoor temperature θrm, because people
-# adapt to a warm spell. θrm weights yesterday most and older days by ADAPTIVE_ALPHA
-# per day (the standard's recommended 0.8). SIA 180 uses an adaptive curve of the
-# same kind — swap its coefficients in here to draw its exact line.
-ADAPTIVE_SLOPE, ADAPTIVE_BASE, ADAPTIVE_CAT = 0.33, 18.8, 3.0
-ADAPTIVE_ALPHA = 0.8
-ADAPTIVE_RM_RANGE = (10.0, 30.0)  # θrm range the formula is defined for (clipped outside)
+# Fig. 4's summer plateau: used for "warm nights" and the weather-memory tipping point.
+COMFORT_T = FIG4_UPPER[-1][1]
 
 # Candidate time constants (days) for the "weather memory" fit — the one whose
 # exponentially weighted outdoor mean best explains the indoor daily mean wins.
@@ -91,9 +98,8 @@ RHYTHM_RANGE = 1.0
 C_IN = "#e8633a"      # indoor temperature (warm)
 C_IN_FILL = "rgba(232,99,58,0.15)"
 C_OUT = "#2f7ec4"     # outdoor temperature (cool)
-C_COMFORT = "#e8a33a"  # 26.5 °C threshold (line + bars)
-C_HOT = "#d6453a"      # 28 °C threshold (line + bars)
-C_LIMIT = "#6b6a65"    # adaptive comfort limit (neutral)
+C_FIG4 = "#e0a800"    # SIA 180 Fig. 4 limit (line + bars) — validated against C_IN / C_OUT
+C_FIG3 = "#4a3aa7"    # SIA 180 Fig. 3 limit (line + bars) — violet: a red would clash with C_IN
 SEQ_BLUE = [[0, "#86b6ef"], [0.33, "#3987e5"], [0.66, "#1c5cab"], [1, "#0d366b"]]
 DIVERGING = [[0, "#184f95"], [0.25, "#6da7ec"], [0.5, "#f0efec"],
              [0.75, "#f0957a"], [1, "#b8321a"]]
@@ -164,7 +170,7 @@ def hours_over(temp: pd.Series, threshold: float | pd.Series) -> pd.Series:
     A flat 0.25 h/reading undercounts the live polls 4-8× (they arrive every
     1-2 h, not every 15 min) — so weight each reading by the gap to the next,
     capped at READING_CAP_H. On the 15-min export this reduces to 0.25 h.
-    ``threshold`` may be a per-reading Series (e.g. the adaptive limit).
+    ``threshold`` may be a per-reading Series (e.g. a Minergie limit curve).
     """
     s = temp.dropna()
     if isinstance(threshold, pd.Series):
@@ -174,9 +180,33 @@ def hours_over(temp: pd.Series, threshold: float | pd.Series) -> pd.Series:
     return (s > threshold) * (gap.dt.total_seconds() / 3600)
 
 
-def per_reading(daily: pd.Series, index: pd.DatetimeIndex) -> pd.Series:
-    """Spread a daily value onto every reading of that day."""
-    return daily.reindex(index.normalize()).set_axis(index)
+def per_reading(hourly: pd.Series, index: pd.DatetimeIndex) -> pd.Series:
+    """Spread an hourly value onto every reading within that hour."""
+    return hourly.reindex(index.floor("h")).set_axis(index)
+
+
+def in_season(index: pd.DatetimeIndex, season: tuple[str, str]) -> np.ndarray:
+    """True for timestamps inside a (MM-DD, MM-DD) window, any year."""
+    md = index.strftime("%m-%d")
+    return (md >= season[0]) & (md <= season[1])
+
+
+def minergie_limits(out: pd.DataFrame) -> pd.DataFrame:
+    """Hourly SIA 180 Fig. 3 / Fig. 4 upper limits (see FIG3_UPPER / FIG4_UPPER).
+
+    θrm is the mean outdoor air temperature over the RM_HOURS hours *before*
+    each hour, hence the shift.
+    """
+    rm = (out["temp"].rolling(f"{RM_HOURS}h", min_periods=RM_HOURS * 3 // 4)
+          .mean().shift(1))
+    return pd.DataFrame({"rm": rm,
+                         "fig3": np.interp(rm, *zip(*FIG3_UPPER)),
+                         "fig4": np.interp(rm, *zip(*FIG4_UPPER))}, index=out.index)
+
+
+def minergie_hours(temp: pd.Series, limit: pd.Series, season: tuple[str, str]) -> pd.Series:
+    """Hours above a Minergie limit curve, counted only inside its season."""
+    return hours_over(temp[in_season(temp.index, season)], limit)
 
 
 def diurnal_swing(temp: pd.Series) -> pd.Series:
@@ -206,10 +236,6 @@ def daily_indoor(df: pd.DataFrame) -> pd.DataFrame:
 def daily_outdoor(out: pd.DataFrame) -> pd.DataFrame:
     g = out["temp"].resample("D").agg(["min", "max", "mean"])
     g["swing"] = diurnal_swing(out["temp"]).reindex(g.index)
-    # running-mean outdoor temperature θrm and the adaptive upper limit it sets
-    g["rm"] = g["mean"].shift(1).ewm(alpha=1 - ADAPTIVE_ALPHA, adjust=False).mean()
-    g["limit"] = (ADAPTIVE_SLOPE * g["rm"].clip(*ADAPTIVE_RM_RANGE)
-                  + ADAPTIVE_BASE + ADAPTIVE_CAT)
     return g
 
 
@@ -274,14 +300,15 @@ def heatmap_matrix(df: pd.DataFrame):
     return [d.strftime("%Y-%m-%d") for d in piv.index], list(range(24)), piv.values.tolist()
 
 
-def monthly_hours(temp: pd.Series, limit: pd.Series) -> pd.DataFrame:
+def monthly_hours(temp: pd.Series, lim: pd.DataFrame) -> pd.DataFrame:
+    """Per month: hours covered by readings and hours above each Minergie limit
+    (``lim`` holds the per-reading fig3 / fig4 limits)."""
     m = pd.DataFrame({
         "covered": hours_over(temp, -math.inf).resample("MS").sum(),
-        "over": hours_over(temp, COMFORT_T).resample("MS").sum(),
-        "warm": hours_over(temp, WARM_T).resample("MS").sum(),
-        "adaptive": hours_over(temp, limit).resample("MS").sum(),
-    })
-    m["pct"] = 100 * m["over"] / m["covered"]
+        "fig4": minergie_hours(temp, lim["fig4"], FIG4_SEASON).resample("MS").sum(),
+        "fig3": minergie_hours(temp, lim["fig3"], FIG3_SEASON).resample("MS").sum(),
+    }).fillna(0)
+    m["pct"] = 100 * m["fig4"] / m["covered"]
     return m
 
 
@@ -301,16 +328,19 @@ def base_layout(fig, height=420, title=None):
     return fig
 
 
-def add_thresholds(fig, labels=True):
-    """The fixed 26.5 °C (Minergie) and 28 °C reference lines."""
-    for y, color, text, pos in ((COMFORT_T, C_COMFORT, "26.5 °C — Minergie comfort", "bottom right"),
-                                (WARM_T, C_HOT, "28 °C — warm", "top left")):
-        # passing annotation_text=None would still draw plotly's "new text" placeholder
-        label = dict(annotation_text=text, annotation_position=pos) if labels else {}
-        fig.add_hline(y=y, line=dict(color=color, width=1.6, dash="dash"), **label)
+def add_limit_lines(fig, lim, fig3=True):
+    """Minergie's hourly limit curves (SIA 180 Fig. 4, optionally Fig. 3)."""
+    curves = [("fig4", f"Minergie Fig. 4 limit (≤ {MINERGIE_MAX_H} h/a above)", C_FIG4, "dash")]
+    if fig3:
+        curves.append(("fig3", "Minergie Fig. 3 limit (never above)", C_FIG3, "solid"))
+    for col, name, color, dash in curves:
+        fig.add_trace(go.Scatter(
+            x=lim.index, y=lim[col], name=name, mode="lines",
+            line=dict(color=color, width=1.6, dash=dash),
+            hovertemplate=f"%{{y:.1f}} °C<extra>{col.replace('fig', 'Fig. ')} limit</extra>"))
 
 
-def fig_overview(df, out, rangeslider=True):
+def fig_overview(df, out, lim, rangeslider=True):
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=out.index, y=out["temp"], name="Outdoor (Pully)", mode="lines",
@@ -331,20 +361,18 @@ def fig_overview(df, out, rangeslider=True):
         x=lone.index, y=lone, mode="markers", name="Indoor", legendgroup="indoor",
         showlegend=False, marker=dict(color=C_IN, size=5),
         hovertemplate="%{y:.1f} °C<extra>Indoor</extra>"))
+    add_limit_lines(fig, lim, fig3=False)
     base_layout(fig, 460)
     fig.update_yaxes(title_text="Temperature (°C)")
-    fig.add_hline(y=COMFORT_T, line=dict(color=C_COMFORT, width=1.2, dash="dash"),
-                  annotation_text="26.5 °C", annotation_position="top left")
     if rangeslider:
         fig.update_xaxes(rangeslider=dict(visible=True), rangeslider_thickness=0.06)
     return fig
 
 
-def fig_daily(di, do):
-    """Daily indoor temperature vs the fixed and adaptive comfort limits,
-    emphasising the overnight floor (daily minimum)."""
+def fig_daily(di, do, lim):
+    """Daily indoor temperature vs Minergie's two limit curves, emphasising the
+    overnight floor (daily minimum)."""
     x = di.index
-    lim = do["limit"].reindex(x)
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=x, y=di["max"], name="Daily peak", mode="lines",
@@ -358,39 +386,35 @@ def fig_daily(di, do):
         x=x, y=di["mean"], name="Daily mean", mode="lines",
         line=dict(color=C_IN, width=2.6),
         hovertemplate="%{y:.1f} °C<extra>mean</extra>"))
-    fig.add_trace(go.Scatter(
-        x=x, y=lim, name="Adaptive limit (EN 16798-1 II)", mode="lines",
-        line=dict(color=C_LIMIT, width=2, shape="hv"),
-        hovertemplate="%{y:.1f} °C<extra>adaptive limit</extra>"))
+    add_limit_lines(fig, lim)
     # context only — hidden by default so it doesn't squash the indoor scale
     fig.add_trace(go.Scatter(
         x=do.index, y=do["mean"], name="Outdoor daily mean", mode="lines", visible="legendonly",
         line=dict(color=C_OUT, width=2, dash="dot"),
         hovertemplate="%{y:.1f} °C<extra>outdoor mean</extra>"))
-    base_layout(fig, 460)
+    base_layout(fig, 480)
     fig.update_layout(legend_traceorder="normal")  # fill="tonexty" flips it otherwise
     fig.update_yaxes(title_text=f"Indoor temp — {TEMP_REF} (°C)")
-    add_thresholds(fig)
     return fig
 
 
 def fig_hours(mh, cum, cum_alt):
-    """Hours above the thresholds per month (left) and the running total vs the
-    Minergie budget (right) — two panels, each with its own scale."""
+    """Hours above the Minergie limits per month (left) and the running total vs
+    the 100 h/a limit (right) — two panels, each with its own scale."""
     fig = make_subplots(rows=1, cols=2, column_widths=[0.55, 0.45], horizontal_spacing=0.1,
-                        subplot_titles=("Hours per month", "Running total, hours above 26.5 °C"))
+                        subplot_titles=("Hours per month",
+                                        "Running total, hours above SIA 180 Fig. 4"))
     months = [p.strftime("%b") for p in mh.index]
-    custom = np.c_[mh["pct"], mh["adaptive"]]
-    fig.add_trace(go.Bar(
-        x=months, y=mh["over"], name="above 26.5 °C", marker_color=C_COMFORT,
-        text=[f"{v:.0f} h" if v >= 0.5 else "" for v in mh["over"]],
-        textposition="outside", textfont_size=11, cliponaxis=False, customdata=custom,
-        hovertemplate=("%{y:.0f} h above 26.5 °C (%{customdata[0]:.0f} % of the month)"
-                       "<br>%{customdata[1]:.0f} h above the adaptive limit<extra></extra>")),
-        row=1, col=1)
-    fig.add_trace(go.Bar(
-        x=months, y=mh["warm"], name="above 28 °C", marker_color=C_HOT,
-        hovertemplate="%{y:.0f} h above 28 °C<extra></extra>"), row=1, col=1)
+    for col, name, color in (("fig4", "above Fig. 4 (limit 100 h/a)", C_FIG4),
+                             ("fig3", "above Fig. 3 (limit 0 h)", C_FIG3)):
+        fig.add_trace(go.Bar(
+            x=months, y=mh[col], name=name, marker_color=color,
+            text=[f"{v:.0f} h" if v >= 0.5 else "" for v in mh[col]],
+            textposition="outside", textfont_size=11, cliponaxis=False,
+            customdata=mh["pct"] if col == "fig4" else None,
+            hovertemplate=(f"%{{y:.0f}} h {name.split(' (')[0]}"
+                           + (" (%{customdata:.0f} % of the month)" if col == "fig4" else "")
+                           + "<extra></extra>")), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=cum.index, y=cum.values, name=REF_SHORT, mode="lines",
         line=dict(color=C_IN, width=2.6),
@@ -399,16 +423,17 @@ def fig_hours(mh, cum, cum_alt):
         x=cum_alt.index, y=cum_alt.values, name=ALT_SHORT, mode="lines",
         line=dict(color=C_IN, width=1.6, dash="dot"),
         hovertemplate=f"%{{y:.0f}} h<extra>{ALT_SHORT}</extra>"), row=1, col=2)
-    fig.add_hline(y=MINERGIE_BUDGET_H, row=1, col=2,
-                  line=dict(color=C_OUT, width=1.8, dash="dash"),
-                  annotation_text=f"Minergie budget ≈ {MINERGIE_BUDGET_H} h / year",
+    fig.add_hline(y=MINERGIE_MAX_H, row=1, col=2,
+                  line=dict(color=C_FIG4, width=1.8, dash="dash"),
+                  annotation_text=f"Minergie limit: {MINERGIE_MAX_H} h / year",
                   annotation_position="top left")
     base_layout(fig, 440)
     fig.update_layout(barmode="group", bargap=0.3, bargroupgap=0.08, hovermode="closest",
                       legend=dict(y=1.12), uniformtext=dict(minsize=11, mode="show"))
     fig.update_yaxes(title_text="Hours", row=1, col=1)
     fig.update_yaxes(rangemode="tozero", row=1, col=2)
-    fig.update_yaxes(range=[0, mh["over"].max() * 1.15], row=1, col=1)  # room for labels
+    fig.update_yaxes(range=[0, mh[["fig4", "fig3"]].max().max() * 1.15 + 1],
+                     row=1, col=1)  # room for labels
     return fig
 
 
@@ -431,8 +456,10 @@ def fig_memory(mem):
     fig.update_layout(hovermode="closest")
     fig.update_xaxes(title_text=f"Outdoor daily mean, weighted over the last ~{mem['tau']} days (°C)")
     fig.update_yaxes(title_text=f"Indoor daily mean — {REF_SHORT} (°C)")
-    add_thresholds(fig, labels=False)
-    fig.add_vline(x=mem["tip"], line=dict(color=C_COMFORT, width=1.4, dash="dot"),
+    fig.add_hline(y=COMFORT_T, line=dict(color=C_FIG4, width=1.6, dash="dash"),
+                  annotation_text=f"{COMFORT_T:g} °C — Minergie Fig. 4 limit in summer",
+                  annotation_position="top left")
+    fig.add_vline(x=mem["tip"], line=dict(color=C_FIG4, width=1.4, dash="dot"),
                   annotation_text=f"tipping point ≈ {mem['tip']:.1f} °C",
                   annotation_position="bottom right")
     return fig
@@ -489,16 +516,16 @@ def render(summary, figs) -> str:
     cards = [
         ("Latest reading", f"{s['last_t']:.1f} °C",
          f"{s['last_when']} · {s['last_rh']:.0f} % RH"),
-        ("Hours over 26.5 °C", f"{s['comfort_h']:,.0f} h",
-         f"{s['comfort_pct']:.0f} % of the time · {ALT_SHORT} ≈ {s['comfort_h_alt']:,.0f} h"
-         f" · Minergie target ≈{MINERGIE_BUDGET_H} h/yr"),
-        ("Above adaptive limit", f"{s['adaptive_h']:,.0f} h",
-         f"EN 16798-1 cat. II · {ALT_SHORT} ≈ {s['adaptive_h_alt']:,.0f} h"),
+        ("Minergie limit · Fig. 4", f"{s['fig4_h']:,.0f} h",
+         f"above SIA 180 Fig. 4 · allowed {MINERGIE_MAX_H} h/a · {s['fig4_pct']:.0f} % of "
+         f"the time · {ALT_SHORT} ≈ {s['fig4_h_alt']:,.0f} h"),
+        ("Minergie comfort field · Fig. 3", f"{s['fig3_h']:,.0f} h",
+         f"above SIA 180 Fig. 3 · allowed 0 h · {ALT_SHORT} ≈ {s['fig3_h_alt']:,.0f} h"),
         ("Warm nights", f"{s['warm_nights']} days",
          f"never dropped below 26.5 °C · longest run {s['warm_run']} days"),
         ("Tipping point", f"{s['tip']:.1f} °C outdoors",
-         f"recent-days mean above which the {REF_SHORT} averages > 26.5 °C "
-         f"({ALT_SHORT}: {s['tip_alt']:.1f} °C)"),
+         f"recent-days mean above which the {REF_SHORT} averages > {COMFORT_T:g} °C, "
+         f"Minergie's summer limit ({ALT_SHORT}: {s['tip_alt']:.1f} °C)"),
         ("Weather memory", f"~{s['tau']} days",
          f"+{s['b']:.2f} °C indoors per +1 °C outdoors (r = {s['mem_r']:.2f})"),
         ("Night cooling used", f"{s['night_pct']:.0f} %",
@@ -515,26 +542,30 @@ def render(summary, figs) -> str:
     sections = [
         ("Indoor vs outdoor temperature",
          f"Every indoor reading against the measured hourly outdoor temperature at "
-         f"{OUTDOOR_STATION}, ~6 km away on the same lakeshore. Dashed: 26.5 °C. Drag on "
-         "the chart or use the slider to zoom into any stretch.",
+         f"{OUTDOOR_STATION}, ~6 km away on the same lakeshore. Dashed: Minergie's limit "
+         "(SIA 180 Fig. 4), which follows the outdoor temperature of the previous 48 h. "
+         "Drag on the chart or use the slider to zoom into any stretch.",
          "overview"),
         ("Last 7 days",
          "The same chart zoomed to the most recent week — mostly live polls "
          "(one reading every 30-60 min) rather than the 15-min export. A reading "
          "more than an hour from its neighbours shows as a lone dot.",
          "recent"),
-        ("Daily temperature vs comfort limits",
-         f"{off_note} Band = daily min→max, bold line = daily mean. Dashed: the fixed "
-         "26.5 °C (Minergie) and 28 °C lines. Grey step: the adaptive limit "
-         "(EN 16798-1 cat. II), which rises after warm days because people adapt — the "
-         "kind of yardstick SIA 180 uses for naturally ventilated homes. Watch the "
+        ("Daily temperature vs the Minergie limits",
+         f"{off_note} Band = daily min→max, bold line = daily mean. Minergie's summer "
+         "comfort rules use two SIA 180 curves that rise with the mean outdoor "
+         "temperature of the previous 48 h: violet = Fig. 3, the comfort field, never to "
+         "be exceeded (mid-April → mid-October); dashed amber = Fig. 4, which may be "
+         f"exceeded at most {MINERGIE_MAX_H} h a year (April → October) before cooling is "
+         "required. Minergie checks them in a design simulation of the most exposed room "
+         "with 2035 weather; here they are applied to measured reality. Watch the "
          "overnight floor: when it climbs, the building can't shed the heat at night. "
          "Click “Outdoor daily mean” in the legend to add it.",
          "daily"),
-        ("Hours above the comfort limits",
-         f"Left: hours per month above 26.5 °C and 28 °C (hover for the share of the "
-         f"month and the hours above the adaptive limit). Right: the running total "
-         f"against Minergie's ~{MINERGIE_BUDGET_H} h/year design budget, for the "
+        ("Hours above the Minergie limits",
+         "Left: hours per month above SIA 180 Fig. 4 and Fig. 3, each counted within "
+         "its own season (hover for the share of the month). Right: the running total "
+         f"above Fig. 4 against Minergie's {MINERGIE_MAX_H} h/year limit, for the "
          f"{REF_SHORT} (solid) and the {ALT_SHORT} (dotted).",
          "hours"),
         ("What drives the indoor temperature",
@@ -542,7 +573,7 @@ def render(summary, figs) -> str:
          f"few days (weighted, τ ≈ {s['tau']} days — the memory that fits best, "
          f"r = {s['mem_r']:.2f}). The heavy flat follows the recent weather at "
          f"+{s['b']:.2f} °C per °C; the dotted line marks the outdoor level where it "
-         "crosses 26.5 °C. Dots above the black fit line ran hotter than the weather "
+         f"crosses {COMFORT_T:g} °C, Minergie's Fig. 4 limit in summer. Dots above the black fit line ran hotter than the weather "
          "explains.",
          "memory"),
         ("Night cooling: what actually cools the flat",
@@ -607,9 +638,10 @@ def render(summary, figs) -> str:
   Indoor data: 15-min export + live SwitchBot polls ({s['n_indoor']:,} readings) from an
   entrance sensor, shown as {TEMP_REF}. Outdoor: {OUTDOOR_STATION}, hourly measurements
   (MeteoSwiss open data), {s['n_days']} days with data.
-  Minergie summer-comfort target ≈ {MINERGIE_BUDGET_H} h/year above {COMFORT_T} °C;
-  adaptive limit = {ADAPTIVE_SLOPE:g}·θrm + {ADAPTIVE_BASE + ADAPTIVE_CAT:g} °C
-  (EN 16798-1 cat. II, θrm = running-mean outdoor temperature, α = {ADAPTIVE_ALPHA:g}).
+  Comfort limits: Minergie (Anwendungshilfe Gebäudestandards Minergie 2025, §6) after
+  SIA 180:2014 — Fig. 3 never exceeded ({FIG3_SEASON[0]} → {FIG3_SEASON[1]}), Fig. 4 at
+  most {MINERGIE_MAX_H} h/a ({FIG4_SEASON[0]} → {FIG4_SEASON[1]}); θrm = mean outdoor air
+  temperature over the preceding {RM_HOURS} h at Pully.
   Days covering &lt;{MIN_HOURS_DAY} h are excluded from daily charts.
   Rebuild with <code>uv run build_dashboard.py</code>.
 </footer>
@@ -638,6 +670,8 @@ def main():
     do_all = daily_outdoor(out_all[out_all.index <= df.index.max()])
     out = out_all[(out_all.index >= df.index.min()) & (out_all.index <= df.index.max())]
     do = do_all[do_all.index >= df.index.min().normalize()]
+    lim_all = minergie_limits(out_all[out_all.index <= df.index.max()])
+    lim = lim_all[lim_all.index >= df.index.min().floor("h")]
     print(f"  {len(out)} hourly rows", file=sys.stderr)
 
     di = daily_indoor(df)
@@ -646,9 +680,10 @@ def main():
     mem = weather_memory(di, do_all)
 
     temp_alt = df["temp"] + ALT_SHIFT
-    limit = per_reading(do["limit"], df.index)
-    mh = monthly_hours(df["temp"], limit)
-    comfort_h = float(mh["over"].sum())
+    lim_r = pd.DataFrame({c: per_reading(lim_all[c], df.index) for c in ("fig3", "fig4")})
+    mh = monthly_hours(df["temp"], lim_r)
+    over4 = minergie_hours(df["temp"], lim_r["fig4"], FIG4_SEASON)
+    over4_alt = minergie_hours(temp_alt, lim_r["fig4"], FIG4_SEASON)
     warm = di["min"] > COMFORT_T
     offered = nc[nc["avail"] > 1]  # skip nights with (almost) nothing on offer
     last = df.dropna(subset=["temp"]).iloc[-1]
@@ -662,11 +697,11 @@ def main():
         "last_t": float(last["temp"]),
         "last_rh": float(last["hum"]),
         "last_when": f"{last.name:%a %d %b, %H:%M}",
-        "comfort_h": comfort_h,
-        "comfort_pct": float(100 * comfort_h / mh["covered"].sum()),
-        "comfort_h_alt": float(hours_over(temp_alt, COMFORT_T).sum()),
-        "adaptive_h": float(mh["adaptive"].sum()),
-        "adaptive_h_alt": float(hours_over(temp_alt, limit).sum()),
+        "fig4_h": float(over4.sum()),
+        "fig4_pct": float(100 * over4.sum() / mh["covered"].sum()),
+        "fig4_h_alt": float(over4_alt.sum()),
+        "fig3_h": float(mh["fig3"].sum()),
+        "fig3_h_alt": float(minergie_hours(temp_alt, lim_r["fig3"], FIG3_SEASON).sum()),
         "warm_nights": int(warm.sum()),
         "warm_run": int(warm.groupby((~warm).cumsum()).sum().max()),
         "tau": mem["tau"],
@@ -687,13 +722,14 @@ def main():
 
     week_ago = df.index.max() - pd.Timedelta(days=7)
     figs = {
-        "overview": div(fig_overview(df, out), "overview"),
+        "overview": div(fig_overview(df, out, lim), "overview"),
         "recent": div(fig_overview(df[df.index >= week_ago],
                                    out[out.index >= week_ago],
-                                   rangeslider=False), "recent"),
-        "daily": div(fig_daily(di, do), "daily"),
-        "hours": div(fig_hours(mh, hours_over(df["temp"], COMFORT_T).cumsum(),
-                               hours_over(temp_alt, COMFORT_T).cumsum()), "hours"),
+                                   lim[lim.index >= week_ago], rangeslider=False), "recent"),
+        "daily": div(fig_daily(di, do, lim), "daily"),
+        # the Minergie limit is per calendar year, so the running total restarts each year
+        "hours": div(fig_hours(mh, over4.groupby(over4.index.year).cumsum(),
+                               over4_alt.groupby(over4_alt.index.year).cumsum()), "hours"),
         "memory": div(fig_memory(mem), "memory"),
         "night": div(fig_night(nc), "night"),
         "heatmap": div(fig_heatmap(hm_days, hm_hours, hm_z), "heatmap"),

@@ -37,8 +37,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(HERE, "data", "outdoor_hourly.csv")
 BASE = "https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn/puy/ogd-smn_puy_h_{}.csv"
 
-# Keep a few weeks before the indoor START_DATE so the running-mean outdoor
-# temperature (adaptive comfort limit, 3-day memory fit) is warmed up on day one.
+# Keep a few weeks before the indoor START_DATE so the 48-h running-mean outdoor
+# temperature (Minergie limits) and the 3-day memory fit are warmed up on day one.
 KEEP_FROM = "2026-04-01 00:00"
 
 # MeteoSwiss parameter → our column
