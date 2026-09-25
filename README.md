@@ -1,10 +1,11 @@
 # Malley apartment — heat & comfort dashboard
 
 An interactive dashboard of the indoor climate of a **Minergie‑P‑Eco apartment** in
-Malley (CH), built from a temperature sensor's 15‑minute export and overlaid
-with outdoor weather. It was made to understand how the building handles summer heat —
-how much outdoor heat reaches inside, how the flat cools (or doesn't) at night, and how
-it compares to the SIA 180 / Minergie summer‑comfort expectations.
+Malley (CH), built from a temperature sensor's 15‑minute export and live polls, overlaid
+with measured outdoor weather from the MeteoSwiss station in Pully. It was made to
+understand how the building handles summer heat — how much outdoor heat reaches inside,
+how the flat cools (or doesn't) at night, and how it compares to the SIA 180 / Minergie
+summer‑comfort expectations.
 
 **Live dashboard:** https://xdubois.github.io/temp_malley/ (rebuilt automatically on every push.)
 
@@ -13,13 +14,20 @@ it compares to the SIA 180 / Minergie summer‑comfort expectations.
 `uv run build_dashboard.py` generates a single self‑contained HTML file,
 `temperature_dashboard.html` (Plotly inlined — opens offline in any browser), with:
 
-1. **Indoor vs outdoor temperature** — every 15‑min reading vs hourly outdoor, zoomable
-2. **Seasonal warming trend** — daily min/mean/max
-3. **Day × hour heatmap** — when in the day the flat heats up
-4. **Daily day↔night swing** — indoor vs outdoor amplitude (the building's damping)
-5. **Sun & light vs temperature** — solar gain
-6. **Comfort vs thresholds** — against 26.5 °C (Minergie) and 28 °C
-7. **Hours above 26.5 °C** — cumulative, vs the ~100 h/year Minergie design budget
+Headline cards (latest reading, hours over 26.5 °C, hours above the adaptive limit, warm
+nights, tipping point, weather memory, night cooling used, damping), then:
+
+1. **Indoor vs outdoor temperature** — every indoor reading vs hourly outdoor, zoomable
+2. **Last 7 days** — the same, zoomed on the live polls
+3. **Daily temperature vs comfort limits** — daily min/mean/max against 26.5 °C
+   (Minergie), 28 °C and the adaptive limit (EN 16798‑1 cat. II)
+4. **Hours above the comfort limits** — per month, and the running total vs the ~100 h/year
+   Minergie design budget (entrance sensor and living‑room estimate)
+5. **What drives the indoor temperature** — indoor daily mean vs the outdoor mean of the
+   last few days, with the fitted response and the outdoor "tipping point" for 26.5 °C
+6. **Night cooling** — cooling offered by the night air vs the drop achieved, coloured
+   by the overnight humidity drop (a tracer of outdoor air getting in)
+7. **Daily rhythm** — day × hour heatmap of the deviation from each day's mean
 
 ## Requirements
 
@@ -31,8 +39,12 @@ it compares to the SIA 180 / Minergie summer‑comfort expectations.
 uv run build_dashboard.py        # build the dashboard + rendered analysis
 ```
 
-First run fetches outdoor weather from [open-meteo](https://open-meteo.com/) and
-caches it locally (`.outdoor_cache.json`); later runs are offline.
+The build is fully offline — it reads everything from `data/`. To refresh the outdoor
+weather locally (the poll workflow does it automatically), run:
+
+```bash
+uv run fetch_outdoor.py          # top up data/outdoor_hourly.csv from MeteoSwiss
+```
 
 ### Configuration (top of `build_dashboard.py`)
 
@@ -41,7 +53,9 @@ caches it locally (`.outdoor_cache.json`); later runs are offline.
 | `START_DATE` | `2026-04-28` | Ignore readings before this date (move‑in). Override per‑run: `uv run build_dashboard.py --from=2026-05-01` |
 | `APPLY_OFFSET` | `False` | If `True`, add `SENSOR_OFFSET` to every reading to estimate the living‑space temperature. `False` shows the raw entrance‑sensor data (the version to share externally). |
 | `SENSOR_OFFSET` | `0.8` | The entrance sensor reads ~0.8 °C cooler than the rest of the flat. |
-| `LAT`, `LON` | `46.53, 6.59` | Location for the outdoor weather (Malley). |
+| `ADAPTIVE_SLOPE`, `ADAPTIVE_BASE`, `ADAPTIVE_CAT` | `0.33, 18.8, 3.0` | Adaptive comfort limit = slope·θrm + base + cat (EN 16798‑1 cat. II). Swap in SIA 180's coefficients to draw its curve. |
+| `ADAPTIVE_ALPHA` | `0.8` | Daily decay of the running‑mean outdoor temperature θrm. |
+| `MEMORY_TAUS_D` | `1…10` | Candidate time constants (days) for the weather‑memory fit; the best one is used. |
 
 ## Live data (automatic)
 
@@ -49,9 +63,9 @@ caches it locally (`.outdoor_cache.json`); later runs are offline.
 to `data/sensor_auto.csv` — an append-only log kept separate from the manually
 exported `sensor_15min.csv`, so re-dumping the manual export never clobbers
 polled rows (`build_dashboard.py` merges both on read). `poll-sensor.yml` runs it
-at :07 and :37 (grid slots, so readings land on the dump's cadence — GitHub fires
+(together with `fetch_outdoor.py`, see below) at :07 and :37 (grid slots, so readings land on the dump's cadence — GitHub fires
 cron late and skips runs, so two slots/hour ≈ hourly in practice) and commits
-the reading, which rebuilds the dashboard. The API only returns the *current*
+the new data, which rebuilds the dashboard. The API only returns the *current*
 reading, so it accumulates going forward — the app's manual export remains the
 only way to backfill older history.
 
@@ -64,21 +78,23 @@ About → tap to open Developer Options); find the Hub 2 id with `uv run --env-f
 
 ```
 .
-├── build_dashboard.py     # parse CSV → fetch weather → aggregate → render HTML
+├── build_dashboard.py     # read data/ → aggregate → render HTML (offline)
 ├── fetch_sensor.py        # poll the Hub 2 (Cloud API) → append one row to the CSV
+├── fetch_outdoor.py       # MeteoSwiss Pully hourly data → data/outdoor_hourly.csv
 ├── data/
 │   ├── sensor_15min.csv   # manual app exports (overwrite anytime)
 │   ├── sensor_auto.csv    # append-only API poll log (merged with the above on read)
-│   └── sensor_1min.csv    # 1‑minute export (higher resolution, not yet used)
+│   ├── sensor_1min.csv    # 1‑minute export (higher resolution, not yet used)
+│   └── outdoor_hourly.csv # measured outdoor weather (Pully), refreshed by the poll
 ├── .github/workflows/
-│   ├── poll-sensor.yml    # at :07/:37: fetch_sensor.py → commit the reading
+│   ├── poll-sensor.yml    # at :07/:37: fetch_sensor.py + fetch_outdoor.py → commit
 │   └── pages.yml          # build + deploy the dashboard (on push / after a poll)
 ├── pyproject.toml / uv.lock
 └── README.md
 ```
 
-Generated files (`temperature_dashboard.html`, `.outdoor_cache.json`) are git‑ignored —
-rebuild them with the command above.
+The generated `temperature_dashboard.html` is git‑ignored — rebuild it with the command
+above.
 
 ## Data
 
@@ -86,5 +102,10 @@ rebuild them with the command above.
   (columns: temperature, relative humidity, dew point, VPD, absolute humidity, light;
   European number format with comma decimals). Recent readings are polled live
   from the Hub 2 via the [SwitchBot Open API](https://github.com/OpenWonderLabs/SwitchBotAPI).
-- **Outdoor:** open‑meteo ERA5 archive + forecast, hourly temperature and solar
-  radiation for the building's coordinates.
+- **Outdoor:** hourly **measurements** from the MeteoSwiss SwissMetNet station
+  [Pully (PUY)](https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn/puy/) — lakeside,
+  ~6 km from Malley — via MeteoSwiss open government data (no key needed): air
+  temperature, global radiation, dew point and relative humidity. Stored in UTC,
+  stamped at the start of each hourly mean. This replaced open‑meteo model data,
+  whose ERA5 archive (used for days older than 92) ran ~1.6 °C colder at night than
+  the station and than the forecast model used for recent days.
