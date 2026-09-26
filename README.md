@@ -58,6 +58,7 @@ uv run fetch_outdoor.py          # top up data/outdoor_hourly.csv from MeteoSwis
 | `START_DATE` | `2026-04-28` | Ignore readings before this date (move‑in). Override per‑run: `uv run build_dashboard.py --from=2026-05-01` |
 | `APPLY_OFFSET` | `False` | If `True`, add `SENSOR_OFFSET` to every reading to estimate the living‑space temperature. `False` shows the raw corridor‑sensor data (the version to share externally). |
 | `SENSOR_OFFSET` | `0.8` | The corridor sensor (out of direct sun) reads ~0.8 °C cooler than the living rooms, whose outer walls are about half glass — on sunny evenings the gap is likely larger, so living‑room figures are a minimum. |
+| `COOLING_MEASURES` | blinds, loggia, oven | How the flat was run while measured (passive, by hand); shown in a block above the cards. |
 | `HEATING_DAY_T` | `12` | Outdoor daily mean below which a night counts as a cold (heating) night. |
 | `FIG3_UPPER`, `FIG4_UPPER` | see file | SIA 180 Fig. 3 / Fig. 4 upper limits as (θrm, °C) breakpoints, linear between and flat outside. |
 | `FIG3_SEASON`, `FIG4_SEASON` | `04‑15…10‑15`, `04‑01…10‑31` | Periods in which each limit is assessed. |
