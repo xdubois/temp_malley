@@ -14,15 +14,17 @@ summer‑comfort requirements (SIA 180:2014 Fig. 3 and Fig. 4).
 `uv run build_dashboard.py` generates a single self‑contained HTML file,
 `temperature_dashboard.html` (Plotly inlined — opens offline in any browser), with:
 
-Headline cards (latest reading, hours above Minergie's Fig. 4 and Fig. 3 limits, warm
-nights, tipping point, weather memory, night cooling used, damping), then:
+Headline cards (latest reading, hours above the Fig. 4 comfort limit and the SIA 180 Fig. 3
+limit, warm nights, tipping point, weather memory, night cooling used, damping), then:
 
 1. **Indoor vs outdoor temperature** — every indoor reading vs hourly outdoor, zoomable
 2. **Last 7 days** — the same, zoomed on the live polls
-3. **Daily temperature vs the Minergie limits** — daily min/mean/max against the SIA 180
-   Fig. 3 and Fig. 4 limit curves
-4. **Hours above the Minergie limits** — per month, and the running total above Fig. 4 vs
-   Minergie's 100 h/year limit (entrance sensor and living‑room estimate)
+3. **Daily temperature vs the SIA 180 limits** — daily min/mean/max against the Fig. 3
+   (the norm's limit) and Fig. 4 (comfort) curves
+4. **Legally fine ≠ livable** — a table of the same measured hours against each yardstick
+   (Vaud law, SIA 180, SIA 382/1, Minergie, plus warm nights / peak for contrast), every hour
+   of April–October sorted into *comfortable / too warm yet accepted by SIA 180 / above the
+   SIA 180 limit*, and the running total above Fig. 4 vs Minergie's 100 h and SIA 382/1's 400 h
 5. **What drives the indoor temperature** — indoor daily mean vs the outdoor mean of the
    last few days, with the fitted response and the outdoor "tipping point" where it
    crosses 26.5 °C (Fig. 4's summer plateau)
@@ -56,7 +58,8 @@ uv run fetch_outdoor.py          # top up data/outdoor_hourly.csv from MeteoSwis
 | `SENSOR_OFFSET` | `0.8` | The entrance sensor reads ~0.8 °C cooler than the rest of the flat. |
 | `FIG3_UPPER`, `FIG4_UPPER` | see file | SIA 180 Fig. 3 / Fig. 4 upper limits as (θrm, °C) breakpoints, linear between and flat outside. |
 | `FIG3_SEASON`, `FIG4_SEASON` | `04‑15…10‑15`, `04‑01…10‑31` | Periods in which each limit is assessed. |
-| `MINERGIE_MAX_H` | `100` | Hours per year Fig. 4 may be exceeded (Fig. 3: never). |
+| `MINERGIE_MAX_H` | `100` | Hours per year Fig. 4 may be exceeded under Minergie (Fig. 3: never). |
+| `SIA_MAX_H` | `400` | Same under SIA 382/1 for homes with mechanical ventilation. |
 | `RM_HOURS` | `48` | θrm = mean outdoor air temperature over this many preceding hours. |
 | `MEMORY_TAUS_D` | `1…10` | Candidate time constants (days) for the weather‑memory fit; the best one is used. |
 
@@ -110,7 +113,19 @@ temperature over the preceding 48 h:
 | **Fig. 3** — comfort field | 25 °C up to θrm ≈ 10 °C, rising to 30 °C at θrm = 25 °C | never exceeded | mid‑April → mid‑October |
 | **Fig. 4** — cooling need | 24.5 °C up to θrm = 12 °C, rising to 26.5 °C at θrm = 17.5 °C | ≤ 100 h/year (else cooling is required) | April → October |
 
-The popular "100 h above 26.5 °C" rule is Fig. 4's summer plateau. SIA itself allows 400 h
+The popular "100 h above 26.5 °C" rule is Fig. 4's summer plateau.
+
+### What the law actually checks
+
+In Vaud, the energy regulation ([RLVLEne](https://www.vd.ch/fileadmin/user_upload/organisation/dinf/sipal/fichiers_pdf/reglement_d_application_LEnE.pdf)
+art. 19c) only requires that summer protection be *justified* per SIA 180 / 382/1. For rooms
+without cooling, the one thing it regulates is the **g‑value of the sun protection** — a
+design‑stage check (Valais's [EN‑VS‑102](https://www.vs.ch/documents/16739272/35472472/Aide+EN-VS-102_d%C3%A9f.pdf)
+guide spells it out: without cooling, the requirements "are considered met if an external sun
+protection is installed"). No indoor temperature is ever measured. SIA 180's own temperature
+yardstick, used when the justification is a simulation, is Fig. 3 — which climbs to 30 °C
+after hot spells. So a flat can be perfectly conformant and still unlivable; section 4 of the
+dashboard shows how many hours fall in that gap. SIA itself allows 400 h
 above Fig. 4 for homes with mechanical ventilation; Minergie tightens that to 100 h for every
 building. Minergie checks both curves in a design simulation of the most exposed room with
 2035 weather — the dashboard applies the same curves to what was actually measured, for the
