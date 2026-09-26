@@ -100,6 +100,14 @@ MEMORY_TAUS_D = [1, 2, 3, 4, 5, 7, 10]
 # Main façade / glazing orientation (shown on the dashboard).
 ORIENTATION = "North-West"
 
+# How the flat was run while it was measured — shown above the cards, so the heat
+# reads as what remains despite these habits. Passive, by-hand measures — edit to match.
+COOLING_MEASURES = [
+    "External blinds down on sunny days",
+    "Loggia door open at night to let cool air in",
+    "Heat-producing appliances (oven …) kept to a minimum",
+]
+
 # When counting hours above a threshold, each reading stands in for the time
 # until the next one (0.25 h on the 15-min export, ~1 h on the live polls) —
 # capped so an offline gap isn't all credited to the reading before it.
@@ -714,6 +722,11 @@ def render(summary, figs) -> str:
   h1 {{ margin:0 0 4px; font-size:26px; }}
   .sub {{ color:var(--muted); font-size:14px; }}
   .note {{ color:var(--muted); font-size:12.5px; margin-top:6px; max-width:820px; line-height:1.45; }}
+  .measures {{ max-width:1132px; margin:14px auto 0; padding:10px 16px; background:#fff;
+    border:1px solid var(--line); border-left:3px solid #e0a800; border-radius:10px;
+    font-size:13px; color:var(--ink); }}
+  .measures ul {{ margin:4px 0 0; padding-left:18px; color:var(--muted); line-height:1.5; }}
+  @media (max-width:1180px) {{ .measures {{ margin:14px 24px 0; }} }}
   .cards {{ display:grid; gap:12px; grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
     max-width:1180px; margin:20px auto 8px; padding:0 24px; }}
   .card {{ background:#fff; border:1px solid var(--line); border-radius:12px; padding:14px 16px; }}
@@ -751,6 +764,9 @@ def render(summary, figs) -> str:
     estimated at sensor +{SENSOR_OFFSET:g} °C and probably run hotter on sunny evenings, so
     read their figures as a minimum.</div>
 </header>
+<div class="measures"><b>Cooling measures in place.</b> Measured while the flat was kept
+  cool by hand; the heat shown is what remains despite them:
+  <ul>{"".join(f"<li>{m}</li>" for m in COOLING_MEASURES)}</ul></div>
 <div class="cards">{card_html}</div>
 {sec_html}
 {sources_html(s)}
