@@ -15,7 +15,7 @@ summer‑comfort requirements (SIA 180:2014 Fig. 3 and Fig. 4).
 `temperature_dashboard.html` (Plotly inlined — opens offline in any browser), with:
 
 Headline cards (latest reading, hours above the Fig. 4 comfort limit and the SIA 180 Fig. 3
-limit, warm nights, tipping point, weather memory, night cooling used, damping), then:
+limit, warm nights, tipping point, weather memory, night cooling used, damping), then (a *Data sources* section with links closes the page):
 
 1. **Indoor vs outdoor temperature** — every indoor reading vs hourly outdoor, zoomable
 2. **Last 7 days** — the same, zoomed on the live polls
@@ -28,8 +28,10 @@ limit, warm nights, tipping point, weather memory, night cooling used, damping),
 5. **What drives the indoor temperature** — indoor daily mean vs the outdoor mean of the
    last few days, with the fitted response and the outdoor "tipping point" where it
    crosses 26.5 °C (Fig. 4's summer plateau)
-6. **Night cooling** — cooling offered by the night air vs the drop achieved, coloured
-   by the overnight humidity drop (a tracer of outdoor air getting in)
+6. **Nights** — only the nights that matter: when the flat is above its comfort limit at
+   22:00, how much of the cool night air it used (coloured by the overnight humidity drop,
+   a sign of outdoor air getting in); on heating days (outdoor daily mean below 12 °C), how
+   much heat it lost. Mild nights are left out.
 7. **Daily rhythm** — day × hour heatmap of the deviation from each day's mean
 
 ## Requirements
@@ -54,8 +56,9 @@ uv run fetch_outdoor.py          # top up data/outdoor_hourly.csv from MeteoSwis
 | Setting | Default | Meaning |
 |---|---|---|
 | `START_DATE` | `2026-04-28` | Ignore readings before this date (move‑in). Override per‑run: `uv run build_dashboard.py --from=2026-05-01` |
-| `APPLY_OFFSET` | `False` | If `True`, add `SENSOR_OFFSET` to every reading to estimate the living‑space temperature. `False` shows the raw entrance‑sensor data (the version to share externally). |
-| `SENSOR_OFFSET` | `0.8` | The entrance sensor reads ~0.8 °C cooler than the rest of the flat. |
+| `APPLY_OFFSET` | `False` | If `True`, add `SENSOR_OFFSET` to every reading to estimate the living‑space temperature. `False` shows the raw corridor‑sensor data (the version to share externally). |
+| `SENSOR_OFFSET` | `0.8` | The corridor sensor (out of direct sun) reads ~0.8 °C cooler than the living rooms, whose outer walls are about half glass — on sunny evenings the gap is likely larger, so living‑room figures are a minimum. |
+| `HEATING_DAY_T` | `12` | Outdoor daily mean below which a night counts as a cold (heating) night. |
 | `FIG3_UPPER`, `FIG4_UPPER` | see file | SIA 180 Fig. 3 / Fig. 4 upper limits as (θrm, °C) breakpoints, linear between and flat outside. |
 | `FIG3_SEASON`, `FIG4_SEASON` | `04‑15…10‑15`, `04‑01…10‑31` | Periods in which each limit is assessed. |
 | `MINERGIE_MAX_H` | `100` | Hours per year Fig. 4 may be exceeded under Minergie (Fig. 3: never). |
@@ -129,7 +132,7 @@ dashboard shows how many hours fall in that gap. SIA itself allows 400 h
 above Fig. 4 for homes with mechanical ventilation; Minergie tightens that to 100 h for every
 building. Minergie checks both curves in a design simulation of the most exposed room with
 2035 weather — the dashboard applies the same curves to what was actually measured, for the
-entrance sensor and the living‑room estimate.
+corridor sensor and the living‑room estimate.
 
 ## Data
 

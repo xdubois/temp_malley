@@ -51,11 +51,11 @@ MIN_HOURS_DAY = 12
 # temperatures — swings, damping, correlation and lag are unaffected.
 APPLY_OFFSET = False
 SENSOR_OFFSET = 0.8
-TEMP_REF = (f"living-space estimate (sensor +{SENSOR_OFFSET:g} °C)"
-            if APPLY_OFFSET else "entrance sensor (measured)")
+TEMP_REF = (f"living-room estimate (sensor +{SENSOR_OFFSET:g} °C)"
+            if APPLY_OFFSET else "corridor sensor (measured)")
 # The other reference, shown alongside for the comfort numbers.
-REF_SHORT, ALT_SHORT = (("living rooms (est.)", "entrance sensor") if APPLY_OFFSET
-                        else ("entrance sensor", "living rooms (est.)"))
+REF_SHORT, ALT_SHORT = (("living rooms (est.)", "corridor sensor") if APPLY_OFFSET
+                        else ("corridor sensor", "living rooms (est.)"))
 ALT_SHIFT = -SENSOR_OFFSET if APPLY_OFFSET else SENSOR_OFFSET
 
 # Minergie summer comfort (Anwendungshilfe Gebäudestandards Minergie 2025, §6),
@@ -83,6 +83,12 @@ RM_HOURS = 48
 # reaches 30 °C after hot spells, and SIA 382/1 tolerates 400 h/a above Fig. 4 for homes
 # with mechanical ventilation (as Minergie-P flats have) before cooling is "needed".
 SIA_MAX_H = 400
+
+# Nights are only judged when they matter: a warm night when the flat is above its
+# comfort limit (Fig. 4) at 22:00 — should it cool? — and a cold night on a heating
+# day, outdoor daily mean below 12 °C (the Swiss heating-degree-day convention,
+# 20/12) — does it keep its heat? Mild nights in between need nothing.
+HEATING_DAY_T = 12.0
 
 # Fig. 4's summer plateau: used for "warm nights" and the weather-memory tipping point.
 COMFORT_T = FIG4_UPPER[-1][1]
@@ -269,14 +275,16 @@ def weather_memory(di: pd.DataFrame, do: pd.DataFrame) -> dict:
             "tip": (COMFORT_T - a) / b, "tip_alt": (COMFORT_T - ALT_SHIFT - a) / b}
 
 
-def nightly_cooling(df: pd.DataFrame, out: pd.DataFrame) -> pd.DataFrame:
-    """Per night (22:00 → 08:00): the cooling the outdoor air offered vs what
-    the flat actually shed, and how much outdoor air came in.
+def nightly_cooling(df: pd.DataFrame, out: pd.DataFrame, fig4: pd.Series) -> pd.DataFrame:
+    """Per night (22:00 → 08:00): what the outdoor air offered, what the flat shed,
+    how much outdoor air came in, and whether the night mattered.
 
-    avail = indoor at ~22:00 minus the night's outdoor minimum (the usable
-    gradient); shed = indoor at ~22:00 minus the night's indoor minimum;
-    vent = the overnight fall in indoor absolute humidity — outdoor air coming
-    in dilutes it, so it traces the air exchange.
+    avail = indoor at ~22:00 minus the night's outdoor minimum (the usable gradient);
+    gap = indoor at ~22:00 minus the night's outdoor mean; shed = indoor at ~22:00
+    minus the night's indoor minimum; vent = the overnight fall in indoor absolute
+    humidity — outdoor air coming in dilutes it, so it traces the air exchange.
+    kind = "warm" (flat above the Fig. 4 comfort limit at 22:00), "cold" (heating
+    day, see HEATING_DAY_T) or "mild".
     """
     rows = []
     for d in pd.date_range(df.index.min().normalize(),
@@ -290,7 +298,12 @@ def nightly_cooling(df: pd.DataFrame, out: pd.DataFrame) -> pd.DataFrame:
                 or night.index[-1] < d + pd.Timedelta(hours=30)):
             continue
         start_in = night["temp"].iloc[0]
-        rows.append({"night": d, "avail": start_in - night_out.min(),
+        day_mean = out["temp"].loc[d:d + pd.Timedelta(hours=23)].mean()
+        kind = ("warm" if start_in > fig4.asof(night.index[0])
+                else "cold" if day_mean < HEATING_DAY_T else "mild")
+        rows.append({"night": d, "kind": kind,
+                     "avail": start_in - night_out.min(),
+                     "gap": start_in - night_out.mean(),
                      "shed": start_in - night["temp"].min(),
                      "vent": night["abshum"].iloc[0] - night["abshum"].min()})
     return pd.DataFrame(rows).set_index("night")
@@ -378,9 +391,10 @@ def fig_overview(df, out, lim, rangeslider=True):
     return fig
 
 
-def fig_daily(di, do, lim):
-    """Daily indoor temperature vs Minergie's two limit curves, emphasising the
-    overnight floor (daily minimum)."""
+def fig_daily(di, do, lim, over3):
+    """Daily indoor temperature vs the two SIA 180 limit curves, emphasising the
+    overnight floor (daily minimum). ``over3`` = hours above Fig. 3 per day; those
+    days get a marker, since a few hours are invisible in the band."""
     x = di.index
     # daily means of the hourly limits (θrm is a 48-h mean, so they barely move within a
     # day) — keeps every trace on the day grid, so the hover reads one row per day
@@ -399,6 +413,13 @@ def fig_daily(di, do, lim):
         line=dict(color=C_IN, width=2.6),
         hovertemplate="%{y:.1f} °C<extra>mean</extra>"))
     add_limit_lines(fig, lim)
+    hit = over3[over3 > 0].reindex(x).dropna()
+    fig.add_trace(go.Scatter(
+        x=hit.index, y=di["max"].reindex(hit.index), name="Above the SIA 180 limit",
+        mode="markers", marker=dict(symbol="diamond", size=11, color=C_FIG3,
+                                    line=dict(color="white", width=1.5)),
+        customdata=hit.values,
+        hovertemplate="%{customdata:.1f} h above the SIA 180 limit<extra></extra>"))
     # context only — hidden by default so it doesn't squash the indoor scale
     fig.add_trace(go.Scatter(
         x=do.index, y=do["mean"], name="Outdoor daily mean", mode="lines", visible="legendonly",
@@ -425,8 +446,13 @@ def fig_hours(zones, zones_alt, cum, cum_alt):
                              ("over", "above the SIA 180 limit (Fig. 3)", C_FIG3)):
         fig.add_trace(go.Bar(
             x=x, y=both[col], name=name, marker=dict(color=color, line=dict(color="white", width=1)),
-            text=[f"{v:.0f}" if col == "warm" and v >= 40 else "" for v in both[col]],
-            textposition="inside", insidetextanchor="middle", textfont=dict(size=10, color=INK),
+            # amber: hours inside the segment; violet: often a sliver, so its hours go on top
+            text=[(f"{v:.0f}" if v >= 40 else "") if col == "warm"
+                  else (f'<span style="color:{C_FIG3}">◆</span> {v:.0f} h' if v >= 0.5 else "")
+                  if col == "over" else ""
+                  for v in both[col]],
+            textposition="outside" if col == "over" else "inside", cliponaxis=False,
+            insidetextanchor="middle", textfont=dict(size=10, color=INK),
             hovertemplate=f"%{{y:.0f}} h {name}<extra>%{{x}}</extra>"), row=1, col=1)
     fig.add_trace(go.Scatter(
         x=cum.index, y=cum.values, name=REF_SHORT, mode="lines",
@@ -481,21 +507,35 @@ def fig_memory(mem):
 
 
 def fig_night(nc):
-    fig = go.Figure(go.Scatter(
-        x=nc["avail"], y=nc["shed"], mode="markers", name="One night",
-        marker=dict(color=nc["vent"].clip(lower=0), colorscale=SEQ_BLUE, size=10,
+    """Left: warm nights — how much of the cooling on offer the flat used, coloured by
+    the humidity drop. Right: cold nights — how much heat it lost overnight."""
+    warm, cold = nc[nc["kind"] == "warm"], nc[nc["kind"] == "cold"]
+    fig = make_subplots(rows=1, cols=2, column_widths=[0.6, 0.4], horizontal_spacing=0.22,
+                        subplot_titles=(f"Warm nights: flat too warm at 22:00 ({len(warm)})",
+                                        f"Cold nights: heating days ({len(cold)})"))
+    fig.add_trace(go.Scatter(
+        x=warm["avail"], y=warm["shed"], mode="markers", name="warm night",
+        marker=dict(color=warm["vent"].clip(lower=0), colorscale=SEQ_BLUE, size=10,
                     cmin=0, cmax=float(nc["vent"].quantile(0.95)),
                     line=dict(color="white", width=1),
-                    colorbar=dict(title=dict(text="Indoor<br>humidity<br>drop<br>(g/m³)"),
-                                  thickness=12)),
-        customdata=np.c_[[d.strftime("%a %d %b") for d in nc.index], nc["vent"]],
-        hovertemplate=("night of %{customdata[0]}<br>offered %{x:.1f} °C, "
-                       "achieved %{y:.1f} °C<br>humidity drop %{customdata[1]:.1f} g/m³"
-                       "<extra></extra>")))
+                    colorbar=dict(title=dict(text="Humidity<br>drop<br>(g/m³)"),
+                                  thickness=10, len=0.8, x=0.505)),
+        customdata=np.c_[[d.strftime("%a %d %b") for d in warm.index], warm["vent"].round(1)],
+        hovertemplate=("%{customdata[0]}<br>offered %{x:.1f} °C, cooled %{y:.1f} °C"
+                       "<br>humidity drop %{customdata[1]} g/m³<extra></extra>")), row=1, col=1)
+    fig.add_trace(go.Scatter(
+        x=cold["gap"], y=cold["shed"], mode="markers", name="cold night",
+        marker=dict(color=C_OUT, size=10, line=dict(color="white", width=1)),
+        customdata=[d.strftime("%a %d %b") for d in cold.index],
+        hovertemplate=("%{customdata}<br>%{x:.1f} °C warmer than outside, "
+                       "lost %{y:.1f} °C<extra></extra>")), row=1, col=2)
     base_layout(fig, 440)
-    fig.update_layout(hovermode="closest")
-    fig.update_xaxes(title_text="Cooling offered: evening indoor − night outdoor min (°C)")
-    fig.update_yaxes(title_text="Indoor drop achieved (°C)", rangemode="tozero")
+    fig.update_layout(hovermode="closest", showlegend=False)
+    fig.update_xaxes(title_text="Cooling offered: evening indoor − night outdoor min (°C)",
+                     row=1, col=1)
+    fig.update_xaxes(title_text="Indoor − outdoor, night mean (°C)", row=1, col=2)
+    fig.update_yaxes(title_text="Indoor drop overnight (°C)", rangemode="tozero", row=1, col=1)
+    fig.update_yaxes(title_text="Heat lost overnight (°C)", rangemode="tozero", row=1, col=2)
     return fig
 
 
@@ -525,66 +565,92 @@ def div(fig, name):
 
 def ladder_html(s) -> str:
     """The same measured hours against each yardstick, from the law to Minergie."""
-    def verdict(value, limit, unit="h"):
+    def verdict(value, limit):
         ok = value <= limit
         return (f'<span class="{"ok" if ok else "ko"}">{"✓" if ok else "✗"}</span> '
-                f'{value:,.0f} {unit}' + ("" if ok or not limit else f" ({value / limit:.0f}×)"))
+                f'{value:,.0f} h' + ("" if ok or not limit else f" ({value / limit:.0f}×)"))
     rows = [
-        ("Vaud energy law<br><small>RLVLEne art. 19c</small>",
-         "Summer protection “justified” per SIA 180 / 382/1; without cooling, only the "
-         "g-value of the sun protection is regulated",
-         "no indoor temperature limit", "design check — not measurable", "—"),
-        ("SIA 180:2014 — Fig. 3<br><small>the norm's comfort field</small>",
-         "25 °C, rising to 30 °C when the previous 48 h averaged 25 °C outdoors",
-         "never above (mid-Apr → mid-Oct)",
+        ("Vaud law<br><small>RLVLEne art. 19c</small>",
+         "Only the g-value of the sun blinds (design check)",
+         "no temperature limit", "not measurable", "—"),
+        ("SIA 180<br><small>Fig. 3</small>",
+         "25 °C, up to 30 °C after hot spells", "0 h",
          verdict(s["fig3_h"], 0), verdict(s["fig3_h_alt"], 0)),
-        ("SIA 382/1 — cooling need<br><small>homes with mechanical ventilation</small>",
-         "Fig. 4: 24.5 → 26.5 °C", f"≤ {SIA_MAX_H} h/a above",
+        ("SIA 382/1<br><small>homes with ventilation</small>",
+         "Comfort limit, Fig. 4 (24.5–26.5 °C)", f"{SIA_MAX_H} h/year",
          verdict(s["fig4_h"], SIA_MAX_H), verdict(s["fig4_h_alt"], SIA_MAX_H)),
-        ("Minergie<br><small>Anwendungshilfe 2025 §6</small>",
-         "Fig. 4: 24.5 → 26.5 °C (and Fig. 3 never)", f"≤ {MINERGIE_MAX_H} h/a above",
+        ("Minergie<br><small>guide 2025 §6</small>",
+         "Comfort limit, Fig. 4 (24.5–26.5 °C)", f"{MINERGIE_MAX_H} h/year",
          verdict(s["fig4_h"], MINERGIE_MAX_H), verdict(s["fig4_h_alt"], MINERGIE_MAX_H)),
-        ("Livability<br><small>no rule — for contrast</small>",
-         f"Nights that never cooled below {COMFORT_T:g} °C · hottest moment", "—",
+        ("Livability<br><small>no rule</small>",
+         f"Nights that stayed above {COMFORT_T:g} °C · hottest moment", "—",
          f"{s['warm_nights']} nights · {s['t_max']:.1f} °C<br><small>{s['t_max_when']}</small>",
          f"{s['warm_nights_alt']} nights · {s['t_max'] + ALT_SHIFT:.1f} °C"),
     ]
-    head = ("<tr><th>Yardstick</th><th>What it looks at</th><th>Allowed</th>"
+    head = ("<tr><th>Rule</th><th>Checks</th><th>Allowed</th>"
             f"<th>{REF_SHORT.capitalize()}</th><th>{ALT_SHORT.capitalize()}</th></tr>")
     body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>" for r in rows)
     return f'<div class="ladder"><table>{head}{body}</table></div>'
 
 
+def sources_html(s) -> str:
+    links = {
+        "switchbot": "https://github.com/OpenWonderLabs/SwitchBotAPI",
+        "meteoswiss": "https://opendatadocs.meteoswiss.ch/a-data-groundbased/a1-automatic-weather-stations",
+        "pully": "https://data.geo.admin.ch/ch.meteoschweiz.ogd-smn/puy/ogd-smn_puy_h_recent.csv",
+        "minergie": "https://www.minergie.ch/media/250701_anwendungshilfe_gebaeudestandards_minergie_2025-2_de.pdf",
+        "sia180": "https://shop.sia.ch/normenwerk/architekt/sia%20180/d/2014/D/Product",
+        "rlvlene": "https://www.vd.ch/fileadmin/user_upload/organisation/dinf/sipal/fichiers_pdf/reglement_d_application_LEnE.pdf",
+        "envs": "https://www.vs.ch/documents/16739272/35472472/Aide+EN-VS-102_d%C3%A9f.pdf",
+        "repo": "https://github.com/xdubois/temp_malley",
+    }
+    a = lambda key, text: f'<a href="{links[key]}">{text}</a>'  # noqa: E731
+    items = [
+        ("Indoor", f"SwitchBot Hub 2 in the entrance corridor, out of direct sun — app export "
+                   f"(15 min) + live polls via the {a('switchbot', 'SwitchBot API')}. "
+                   f"{s['n_indoor']:,} readings, {s['span']}. Living rooms = sensor "
+                   f"+{SENSOR_OFFSET:g} °C."),
+        ("Outdoor", f"{a('meteoswiss', 'MeteoSwiss')} station Pully (PUY), hourly measurements "
+                    f"({a('pully', 'raw data')}), up to {s['out_last']}."),
+        ("Comfort limits", f"{a('minergie', 'Minergie guide 2025, §6')}, using "
+                           f"{a('sia180', 'SIA 180:2014')} Fig. 3 and 4 with the outdoor mean of the "
+                           f"previous {RM_HOURS} h. SIA 382/1 allows {SIA_MAX_H} h/year above Fig. 4 "
+                           "in homes with mechanical ventilation."),
+        ("Law", f"Vaud {a('rlvlene', 'RLVLEne art. 19c')}; the Valais guide "
+                f"{a('envs', 'EN-VS-102')} explains the same rules."),
+        ("Method", f"Each reading counts until the next one (max {READING_CAP_H:g} h). Days with "
+                   f"under {MIN_HOURS_DAY} h of data are left out of daily charts. Heating day = "
+                   f"outdoor daily mean below {HEATING_DAY_T:g} °C."),
+        ("Code", f"{a('repo', 'github.com/xdubois/temp_malley')} — rebuild with "
+                 "<code>uv run build_dashboard.py</code>."),
+    ]
+    lis = "".join(f"<li><b>{k}</b> — {v}</li>" for k, v in items)
+    return f'<section class="sources"><h2>Data sources</h2><ul>{lis}</ul></section>'
+
+
 def render(summary, figs) -> str:
     s = summary
     built = pd.Timestamp.now(tz=TZ).strftime("%d %b %Y, %H:%M")
-    off_note = (
-        f"Readings have +{SENSOR_OFFSET:g} °C added to estimate living-space "
-        f"temperature (the entrance sensor sits ~{SENSOR_OFFSET:g} °C cooler)."
-        if APPLY_OFFSET else
-        f"These are the raw entrance-sensor readings; the rest of the flat runs "
-        f"~{SENSOR_OFFSET:g} °C warmer.")
+    both = lambda a, b, unit="": f'{a}{unit} <span class="alt">/ {b}{unit}</span>'  # noqa: E731
+    pair = f"{REF_SHORT.split(' (')[0]} / {ALT_SHORT.split(' (')[0]}"
     cards = [
         ("Latest reading", f"{s['last_t']:.1f} °C",
          f"{s['last_when']} · {s['last_rh']:.0f} % RH"),
-        ("Comfort limit · Fig. 4", f"{s['fig4_h']:,.0f} h",
-         f"above it · Minergie allows {MINERGIE_MAX_H} h/a, SIA 382/1 {SIA_MAX_H} · "
-         f"{s['fig4_pct']:.0f} % of the time · {ALT_SHORT} ≈ {s['fig4_h_alt']:,.0f} h"),
-        ("SIA 180 limit · Fig. 3", f"{s['fig3_h']:,.0f} h",
-         f"above the norm's limit (up to 30 °C) · allowed 0 h · "
-         f"{ALT_SHORT} ≈ {s['fig3_h_alt']:,.0f} h"),
-        ("Warm nights", f"{s['warm_nights']} days",
-         f"never dropped below 26.5 °C · longest run {s['warm_run']} days"),
-        ("Tipping point", f"{s['tip']:.1f} °C outdoors",
-         f"recent-days mean above which the {REF_SHORT} averages > {COMFORT_T:g} °C, "
-         f"Minergie's summer limit ({ALT_SHORT}: {s['tip_alt']:.1f} °C)"),
+        ("Above the comfort limit", both(f"{s['fig4_h']:,.0f}", f"{s['fig4_h_alt']:,.0f}", " h"),
+         f"{pair} · Minergie allows {MINERGIE_MAX_H} h, SIA {SIA_MAX_H} h"),
+        ("Above the SIA 180 limit", both(f"{s['fig3_h']:,.0f}", f"{s['fig3_h_alt']:,.0f}", " h"),
+         f"{pair} · allowed 0 h"),
+        ("Warm nights", both(s["warm_nights"], s["warm_nights_alt"]),
+         f"{pair} · never below {COMFORT_T:g} °C"),
+        ("Tipping point", f"{s['tip']:.1f} °C",
+         f"outdoor 3-day mean above which the {REF_SHORT.split(' (')[0]} passes "
+         f"{COMFORT_T:g} °C ({ALT_SHORT.split(' (')[0]}: {s['tip_alt']:.1f} °C)"),
         ("Weather memory", f"~{s['tau']} days",
-         f"+{s['b']:.2f} °C indoors per +1 °C outdoors (r = {s['mem_r']:.2f})"),
+         f"+{s['b']:.2f} °C indoors per °C outdoors"),
         ("Night cooling used", f"{s['night_pct']:.0f} %",
-         f"of what the night air offered (median) · follows air exchange "
-         f"(r = {s['vent_r']:.2f}), not the gradient (r = {s['avail_r']:.2f})"),
+         "of what the night air offered, when the flat was too warm"),
         ("Damping", f"{s['buffer']:.0f}×",
-         f"day↔night swing {s['swing_in']:.1f} °C indoors vs {s['swing_out']:.1f} °C outdoors"),
+         f"daily swing {s['swing_in']:.1f} °C indoors vs {s['swing_out']:.1f} °C outdoors"),
     ]
     card_html = "\n".join(
         f'<div class="card"><div class="k">{k}</div>'
@@ -592,60 +658,36 @@ def render(summary, figs) -> str:
         for k, v, sub in cards)
 
     sections = [
-        ("Indoor vs outdoor temperature",
-         f"Every indoor reading against the measured hourly outdoor temperature at "
-         f"{OUTDOOR_STATION}, ~6 km away on the same lakeshore. Dashed: the comfort limit "
-         "(SIA 180 Fig. 4, Minergie's yardstick), which follows the outdoor temperature of "
-         "the previous 48 h. "
-         "Drag on the chart or use the slider to zoom into any stretch.",
+        ("Indoor vs outdoor",
+         "Indoor readings against the measured outdoor temperature. Dashed: the comfort "
+         "limit (SIA 180 Fig. 4), which follows the last 48 h of weather. Drag to zoom.",
          "overview"),
-        ("Last 7 days",
-         "The same chart zoomed to the most recent week — mostly live polls "
-         "(one reading every 30-60 min) rather than the 15-min export. A reading "
-         "more than an hour from its neighbours shows as a lone dot.",
-         "recent"),
-        ("Daily temperature vs the SIA 180 limits",
-         f"{off_note} Band = daily min→max, bold line = daily mean. Two SIA 180 curves, "
-         "both rising with the mean outdoor temperature of the previous 48 h: violet = "
-         "Fig. 3, the norm's own limit — never to be exceeded, yet it reaches 30 °C after "
-         "hot spells; dashed amber = Fig. 4, the comfort limit Minergie holds to "
-         f"≤ {MINERGIE_MAX_H} h a year (SIA 382/1: {SIA_MAX_H} h for homes with mechanical "
-         "ventilation). The gap between the two is heat the norm accepts but nobody would "
-         "call comfortable. Minergie checks the curves in a design simulation of the most "
-         "exposed room with 2035 weather; here they are applied to measured reality. Watch the "
-         "overnight floor: when it climbs, the building can't shed the heat at night. "
-         "Click “Outdoor daily mean” in the legend to add it.",
+        ("Last 7 days", "Mostly live polls, one reading every 30–60 min.", "recent"),
+        ("Daily temperature vs the limits",
+         f"{REF_SHORT.capitalize()} readings. Violet: the SIA 180 limit (Fig. 3), never to be "
+         "exceeded — "
+         "yet up to 30 °C after hot spells. Dashed amber: the comfort limit (Fig. 4). "
+         "◆ = days above the violet line.",
          "daily"),
         ("Legally fine ≠ livable",
-         "What each yardstick would say about the same measured hours, from the most "
-         "lenient to the strictest. The law only checks the design (the g-value of the sun "
-         "blinds) and never an indoor temperature; SIA 180's own limit tolerates up to "
-         "30 °C; Minergie holds the comfort limit to 100 h a year. Left: every hour from "
-         "April to October sorted into comfortable / too warm yet accepted by SIA 180 "
-         "(amber, hours labelled) / above the SIA 180 limit. Right: the running total above "
-         f"the comfort limit against Minergie's {MINERGIE_MAX_H} h and SIA 382/1's "
-         f"{SIA_MAX_H} h, for the {REF_SHORT} (solid) and the {ALT_SHORT} (dotted).",
+         "The same hours judged by each rule. The law only checks the sun blinds; SIA 180 "
+         f"accepts up to 30 °C; Minergie allows {MINERGIE_MAX_H} h a year above the comfort "
+         "limit. Amber = too warm, yet accepted by SIA 180; ◆ = hours above the SIA 180 limit.",
          "hours"),
         ("What drives the indoor temperature",
-         f"One dot per day: the indoor daily mean against the outdoor mean of the last "
-         f"few days (weighted, τ ≈ {s['tau']} days — the memory that fits best, "
-         f"r = {s['mem_r']:.2f}). The heavy flat follows the recent weather at "
-         f"+{s['b']:.2f} °C per °C; the dotted line marks the outdoor level where it "
-         f"crosses {COMFORT_T:g} °C, Minergie's Fig. 4 limit in summer. Dots above the black fit line ran hotter than the weather "
-         "explains.",
+         f"One dot per day. The flat follows the last ~{s['tau']} days of weather, "
+         f"+{s['b']:.2f} °C per °C outdoors. Right of the dotted line it averages above "
+         f"{COMFORT_T:g} °C.",
          "memory"),
-        ("Night cooling: what actually cools the flat",
-         "Per night (22:00 → 08:00): the cooling the outdoor air offered (evening indoor "
-         "minus the night's outdoor minimum) against the indoor drop achieved. Colour = "
-         "how far indoor absolute humidity fell overnight — a tracer of outdoor air "
-         "coming in. The drop follows the air exchange, not how cool the night was: a "
-         "cool night only helps when the air actually gets in.",
+        ("Nights",
+         "Left: nights when the flat was too warm at 22:00 — how much of the cool night "
+         "air it used. Colour = drop in indoor humidity, a sign that outdoor air got in. "
+         f"Right: cold nights (outdoor daily mean below {HEATING_DAY_T:g} °C) — how much heat "
+         "it lost; this fills in over winter. Mild nights are left out.",
          "night"),
         ("Daily rhythm",
-         "Each row is a day, each column an hour. Colour = deviation from that day's "
-         "own mean (blue cooler, red warmer), so the season's level is removed and the "
-         f"daily cycle shows: coolest around dawn, warmest in the evening when the "
-         f"{ORIENTATION.lower()} façade takes the low sun. Blank cells = missing readings.",
+         "Each cell: that hour vs the day's mean. Coolest at dawn, warmest around 20:00, "
+         f"when the {ORIENTATION.lower()} façade gets the evening sun.",
          "heatmap"),
     ]
     extra = {"hours": ladder_html(s)}  # the comparison table sits above its chart
@@ -673,6 +715,7 @@ def render(summary, figs) -> str:
   .card {{ background:#fff; border:1px solid var(--line); border-radius:12px; padding:14px 16px; }}
   .card .k {{ font-size:12px; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }}
   .card .v {{ font-size:19px; font-weight:600; margin:4px 0 2px; }}
+  .card .v .alt {{ font-size:15px; font-weight:500; color:var(--muted); }}
   .card .s {{ font-size:12.5px; color:var(--muted); }}
   section {{ background:#fff; border:1px solid var(--line); border-radius:14px;
     max-width:1180px; margin:18px auto; padding:18px 22px 8px; }}
@@ -689,34 +732,25 @@ def render(summary, figs) -> str:
   .ladder small {{ color:var(--muted); }}
   .ladder .ok {{ color:#0ca30c; font-weight:700; }}
   .ladder .ko {{ color:#d03b3b; font-weight:700; }}
+  .sources ul {{ margin:6px 0 12px; padding-left:18px; font-size:13px; line-height:1.55;
+    color:var(--muted); }}
+  .sources b {{ color:var(--ink); font-weight:600; }}
+  .sources a {{ color:#256abf; }}
   footer {{ max-width:1180px; margin:8px auto 48px; padding:0 24px; color:var(--muted); font-size:12px; }}
 </style></head>
 <body>
 <header>
   <h1>Malley apartment — heat impact dashboard</h1>
-  <div class="sub">Indoor: {TEMP_REF} · {s['span']} · outdoor: {OUTDOOR_STATION},
-    measured (to {s['out_last']}) · façade {ORIENTATION} · built {built}</div>
-  <div class="note">Measured: air temperature at the entrance sensor, the coolest point
-    of the flat — living rooms run ~{SENSOR_OFFSET:g} °C warmer. The high-inertia flat is
-    thermally homogeneous (surfaces ≈ air), so operative temperature is close to the
-    measured air temperature.</div>
+  <div class="sub">{s['span']} · updated {built}</div>
+  <div class="note">The sensor sits in the entrance corridor, out of direct sun. The living
+    rooms face {ORIENTATION.lower()} with about half of each outer wall in glass; they are
+    estimated at sensor +{SENSOR_OFFSET:g} °C and probably run hotter on sunny evenings, so
+    read their figures as a minimum.</div>
 </header>
 <div class="cards">{card_html}</div>
 {sec_html}
-<footer>
-  Indoor data: 15-min export + live SwitchBot polls ({s['n_indoor']:,} readings) from an
-  entrance sensor, shown as {TEMP_REF}. Outdoor: {OUTDOOR_STATION}, hourly measurements
-  (MeteoSwiss open data), {s['n_days']} days with data.
-  Comfort limits: Minergie (Anwendungshilfe Gebäudestandards Minergie 2025, §6) after
-  SIA 180:2014 — Fig. 3 never exceeded ({FIG3_SEASON[0]} → {FIG3_SEASON[1]}), Fig. 4 at
-  most {MINERGIE_MAX_H} h/a ({FIG4_SEASON[0]} → {FIG4_SEASON[1]}); θrm = mean outdoor air
-  temperature over the preceding {RM_HOURS} h at Pully. SIA 382/1 tolerance for homes with
-  mechanical ventilation: {SIA_MAX_H} h/a above Fig. 4. Legal basis in Vaud: RLVLEne art. 19c
-  (summer protection justified per SIA 180 / 382/1; only the sun protection's g-value is
-  regulated for rooms without cooling).
-  Days covering &lt;{MIN_HOURS_DAY} h are excluded from daily charts.
-  Rebuild with <code>uv run build_dashboard.py</code>.
-</footer>
+{sources_html(s)}
+<footer>Built {built}.</footer>
 </body></html>"""
 
 
@@ -748,7 +782,7 @@ def main():
 
     di = daily_indoor(df)
     hm_days, hm_hours, hm_z = heatmap_matrix(df)
-    nc = nightly_cooling(df, out)
+    nc = nightly_cooling(df, out, lim_all["fig4"])
     mem = weather_memory(di, do_all)
 
     temp_alt = df["temp"] + ALT_SHIFT
@@ -759,7 +793,9 @@ def main():
     over4_alt = minergie_hours(temp_alt, lim_r["fig4"], FIG4_SEASON)
     warm = di["min"] > COMFORT_T
     tmax = df["temp"].idxmax()
-    offered = nc[nc["avail"] > 1]  # skip nights with (almost) nothing on offer
+    warm_n = nc[nc["kind"] == "warm"]
+    offered = warm_n[warm_n["avail"] > 1]  # skip nights with (almost) nothing on offer
+    over3 = minergie_hours(df["temp"], lim_r["fig3"], FIG3_SEASON)
     last = df.dropna(subset=["temp"]).iloc[-1]
     swing_in, swing_out = di["swing"].mean(), do["swing"].reindex(di.index).mean()
 
@@ -772,12 +808,10 @@ def main():
         "last_rh": float(last["hum"]),
         "last_when": f"{last.name:%a %d %b, %H:%M}",
         "fig4_h": float(over4.sum()),
-        "fig4_pct": float(100 * over4.sum() / zones.sum().sum()),
         "fig4_h_alt": float(over4_alt.sum()),
-        "fig3_h": float(minergie_hours(df["temp"], lim_r["fig3"], FIG3_SEASON).sum()),
+        "fig3_h": float(over3.sum()),
         "fig3_h_alt": float(minergie_hours(temp_alt, lim_r["fig3"], FIG3_SEASON).sum()),
         "warm_nights": int(warm.sum()),
-        "warm_run": int(warm.groupby((~warm).cumsum()).sum().max()),
         "warm_nights_alt": int((di["min"] + ALT_SHIFT > COMFORT_T).sum()),
         "t_max": float(df["temp"].max()),
         "t_max_when": f"{tmax:%a %d %b, %H:%M}",
@@ -787,8 +821,9 @@ def main():
         "tip": mem["tip"],
         "tip_alt": mem["tip_alt"],
         "night_pct": float(100 * (offered["shed"] / offered["avail"]).median()),
-        "avail_r": float(nc["shed"].corr(nc["avail"])),
-        "vent_r": float(nc["shed"].corr(nc["vent"])),
+        "night_kinds": nc["kind"].value_counts().to_dict(),
+        "avail_r": float(warm_n["shed"].corr(warm_n["avail"])),
+        "vent_r": float(warm_n["shed"].corr(warm_n["vent"])),
         "swing_in": float(swing_in),
         "swing_out": float(swing_out),
         "buffer": float(swing_out / swing_in),
@@ -803,7 +838,7 @@ def main():
         "recent": div(fig_overview(df[df.index >= week_ago],
                                    out[out.index >= week_ago],
                                    lim[lim.index >= week_ago], rangeslider=False), "recent"),
-        "daily": div(fig_daily(di, do, lim), "daily"),
+        "daily": div(fig_daily(di, do, lim, over3.resample("D").sum()), "daily"),
         # the Minergie limit is per calendar year, so the running total restarts each year
         "hours": div(fig_hours(zones, zones_alt, over4.groupby(over4.index.year).cumsum(),
                                over4_alt.groupby(over4_alt.index.year).cumsum()), "hours"),
