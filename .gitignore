@@ -5,7 +5,6 @@ __pycache__/
 
 # Generated outputs 
 temperature_dashboard.html
-.outdoor_cache.json
 
 #local input
 data/intake/

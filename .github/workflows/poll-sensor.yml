@@ -1,7 +1,9 @@
 name: Poll SwitchBot sensor
 
 # Polls the Hub 2 over the SwitchBot Cloud API and appends one reading to
-# data/sensor_auto.csv; the Pages workflow rebuilds the dashboard after each run.
+# data/sensor_auto.csv, and tops up data/outdoor_hourly.csv with the latest
+# MeteoSwiss Pully measurements; the Pages workflow rebuilds the dashboard after
+# each run.
 on:
   schedule:
     # :07 and :37 — both on the 15-min grid. GitHub fires scheduled jobs 40-75
@@ -35,15 +37,22 @@ jobs:
         # dashboard's pandas/plotly stack on every poll
         run: uv run --script fetch_sensor.py
 
-      - name: Commit the new reading (if any)
+      - name: Update outdoor weather (MeteoSwiss Pully)
+        # a MeteoSwiss hiccup must not block committing the sensor reading —
+        # the next poll catches up on any missed hours
+        continue-on-error: true
+        run: uv run --script fetch_outdoor.py
+
+      - name: Commit the new data (if any)
         run: |
-          if [[ -z "$(git status --porcelain data/sensor_auto.csv)" ]]; then
-            echo "No new reading to commit."
+          FILES="data/sensor_auto.csv data/outdoor_hourly.csv"
+          if [[ -z "$(git status --porcelain $FILES)" ]]; then
+            echo "No new data to commit."
             exit 0
           fi
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/sensor_auto.csv
-          git commit -m "data: SwitchBot reading $(date -u +%FT%TZ)"
+          git add $FILES
+          git commit -m "data: SwitchBot reading + outdoor weather $(date -u +%FT%TZ)"
           # a manual push can race the poll — rebase once and retry
           git push || { git pull --rebase origin main && git push; }
