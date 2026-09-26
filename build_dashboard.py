@@ -574,13 +574,15 @@ def ladder_html(s) -> str:
          "Only the g-value of the sun blinds (design check)",
          "no temperature limit", "not measurable", "—"),
         ("SIA 180<br><small>Fig. 3</small>",
-         "25 °C, up to 30 °C after hot spells", "0 h",
+         "Moves with the last 48 h outdoors: 25 °C when cool, 30 °C once they average 25 °C",
+         "0 h",
          verdict(s["fig3_h"], 0), verdict(s["fig3_h_alt"], 0)),
         ("SIA 382/1<br><small>homes with ventilation</small>",
-         "Comfort limit, Fig. 4 (24.5–26.5 °C)", f"{SIA_MAX_H} h/year",
+         "Comfort limit, Fig. 4, same principle: 24.5 °C when cool, 26.5 °C once they average 17.5 °C",
+         f"{SIA_MAX_H} h/year",
          verdict(s["fig4_h"], SIA_MAX_H), verdict(s["fig4_h_alt"], SIA_MAX_H)),
         ("Minergie<br><small>guide 2025 §6</small>",
-         "Comfort limit, Fig. 4 (24.5–26.5 °C)", f"{MINERGIE_MAX_H} h/year",
+         "Same comfort limit (Fig. 4)", f"{MINERGIE_MAX_H} h/year",
          verdict(s["fig4_h"], MINERGIE_MAX_H), verdict(s["fig4_h_alt"], MINERGIE_MAX_H)),
         ("Livability<br><small>no rule</small>",
          f"Nights that stayed above {COMFORT_T:g} °C · hottest moment", "—",
@@ -614,8 +616,9 @@ def sources_html(s) -> str:
                     f"({a('pully', 'raw data')}), up to {s['out_last']}."),
         ("Comfort limits", f"{a('minergie', 'Minergie guide 2025, §6')}, using "
                            f"{a('sia180', 'SIA 180:2014')} Fig. 3 and 4 with the outdoor mean of the "
-                           f"previous {RM_HOURS} h. SIA 382/1 allows {SIA_MAX_H} h/year above Fig. 4 "
-                           "in homes with mechanical ventilation."),
+                           f"previous {RM_HOURS} h. The published Fig. 3 curve stops at a 25 °C "
+                           "average; above that the limit is held at 30 °C. SIA 382/1 allows "
+                           f"{SIA_MAX_H} h/year above Fig. 4 in homes with mechanical ventilation."),
         ("Law", f"Vaud {a('rlvlene', 'RLVLEne art. 19c')}; the Valais guide "
                 f"{a('envs', 'EN-VS-102')} explains the same rules."),
         ("Method", f"Each reading counts until the next one (max {READING_CAP_H:g} h). Days with "
@@ -665,14 +668,15 @@ def render(summary, figs) -> str:
         ("Last 7 days", "Mostly live polls, one reading every 30–60 min.", "recent"),
         ("Daily temperature vs the limits",
          f"{REF_SHORT.capitalize()} readings. Violet: the SIA 180 limit (Fig. 3), never to be "
-         "exceeded — "
-         "yet up to 30 °C after hot spells. Dashed amber: the comfort limit (Fig. 4). "
-         "◆ = days above the violet line.",
+         "exceeded. It follows the last 48 h of outdoor temperature — 25 °C in cool weather, "
+         "rising to 30 °C once those 48 h average 25 °C. Dashed amber: the comfort limit "
+         "(Fig. 4), 24.5 → 26.5 °C on the same principle. ◆ = days above the violet line.",
          "daily"),
         ("Legally fine ≠ livable",
-         "The same hours judged by each rule. The law only checks the sun blinds; SIA 180 "
-         f"accepts up to 30 °C; Minergie allows {MINERGIE_MAX_H} h a year above the comfort "
-         "limit. Amber = too warm, yet accepted by SIA 180; ◆ = hours above the SIA 180 limit.",
+         "The same hours judged by each rule. The law only checks the sun blinds. SIA 180's "
+         "limit rises with the weather: whenever the flat was too warm, it stood at "
+         f"{s['fig3_when_hot']} °C. Minergie allows {MINERGIE_MAX_H} h a year above the "
+         "comfort limit. Amber = too warm, yet accepted by SIA 180; ◆ = hours above the SIA 180 limit.",
          "hours"),
         ("What drives the indoor temperature",
          f"One dot per day. The flat follows the last ~{s['tau']} days of weather, "
@@ -796,6 +800,8 @@ def main():
     warm_n = nc[nc["kind"] == "warm"]
     offered = warm_n[warm_n["avail"] > 1]  # skip nights with (almost) nothing on offer
     over3 = minergie_hours(df["temp"], lim_r["fig3"], FIG3_SEASON)
+    # the Fig. 3 limit at the times it mattered: while the flat was above the comfort limit
+    lo, hi = lim_r["fig3"][df["temp"] > lim_r["fig4"]].quantile([0.1, 0.9]).round(1)
     last = df.dropna(subset=["temp"]).iloc[-1]
     swing_in, swing_out = di["swing"].mean(), do["swing"].reindex(di.index).mean()
 
@@ -810,6 +816,7 @@ def main():
         "fig4_h": float(over4.sum()),
         "fig4_h_alt": float(over4_alt.sum()),
         "fig3_h": float(over3.sum()),
+        "fig3_when_hot": f"{lo:.1f}" if lo == hi else f"{lo:.1f}–{hi:.1f}",
         "fig3_h_alt": float(minergie_hours(temp_alt, lim_r["fig3"], FIG3_SEASON).sum()),
         "warm_nights": int(warm.sum()),
         "warm_nights_alt": int((di["min"] + ALT_SHIFT > COMFORT_T).sum()),

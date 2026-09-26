@@ -116,7 +116,8 @@ temperature over the preceding 48 h:
 | **Fig. 3** — comfort field | 25 °C up to θrm ≈ 10 °C, rising to 30 °C at θrm = 25 °C | never exceeded | mid‑April → mid‑October |
 | **Fig. 4** — cooling need | 24.5 °C up to θrm = 12 °C, rising to 26.5 °C at θrm = 17.5 °C | ≤ 100 h/year (else cooling is required) | April → October |
 
-The popular "100 h above 26.5 °C" rule is Fig. 4's summer plateau.
+The popular "100 h above 26.5 °C" rule is Fig. 4's summer plateau. The published Fig. 3
+curve stops at θrm = 25 °C; above that the dashboard holds the limit at 30 °C.
 
 ### What the law actually checks
 
@@ -126,8 +127,9 @@ without cooling, the one thing it regulates is the **g‑value of the sun protec
 design‑stage check (Valais's [EN‑VS‑102](https://www.vs.ch/documents/16739272/35472472/Aide+EN-VS-102_d%C3%A9f.pdf)
 guide spells it out: without cooling, the requirements "are considered met if an external sun
 protection is installed"). No indoor temperature is ever measured. SIA 180's own temperature
-yardstick, used when the justification is a simulation, is Fig. 3 — which climbs to 30 °C
-after hot spells. So a flat can be perfectly conformant and still unlivable; section 4 of the
+yardstick, used when the justification is a simulation, is Fig. 3 — which rises with the
+last 48 h of outdoor temperature, from 25 °C to 30 °C once those 48 h average 25 °C (in
+2026, whenever the flat was too warm, it stood at 29.3–30 °C). So a flat can be perfectly conformant and still unlivable; section 4 of the
 dashboard shows how many hours fall in that gap. SIA itself allows 400 h
 above Fig. 4 for homes with mechanical ventilation; Minergie tightens that to 100 h for every
 building. Minergie checks both curves in a design simulation of the most exposed room with
